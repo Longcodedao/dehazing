@@ -13,3 +13,6 @@ id_rsa.pub
 
 dataset/
 dataset/*
+
+data/__pycache__/
+data/__pycache__/*

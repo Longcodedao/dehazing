@@ -10,3 +10,6 @@ uv.lock
 
 id_rsa
 id_rsa.pub
+
+dataset/
+dataset/*

@@ -1,5 +1,5 @@
 import torch
-from torchvision import transforms as v2
+from torchvision.transforms import v2
 import math
 
 
@@ -30,7 +30,7 @@ def print_transform_summary(
 # --------------------------------------------------------------------------
 
 
-def get_reside_haze_transforms(
+def get_haze_transforms(
     dataset_name: str,
     resize_size: int = 640,
     split: str = "train",

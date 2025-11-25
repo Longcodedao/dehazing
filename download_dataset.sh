@@ -1,6 +1,6 @@
 #!/bin/bash
 
-ENV_FILE="./.env"
+ENV_FILE=".env"
 
 check_installation() {
   echo "## 🔍 Check Kaggle CLI Installation"
@@ -66,21 +66,60 @@ test_authentication
 echo "---"
 echo "## 📥 Starting Dataset Downloads"
 
-echo "Downloading: Indoor Training Set ..."
-kaggle datasets download -d balraj98/indoor-training-set-its-residestandard --unzip
+ROOT_DATASET="dataset"
+
+# Create the root directory where all data will be stored
+echo "Creating root data directory: $ROOT_DATASET"
+mkdir -p "$ROOT_DATASET"
+
+---
+
+# 1. Indoor Training Set (ITS)
+FOLDER_NAME="indoor-training-set"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+
+echo "Downloading: Indoor Training Set (ITS)..."
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d balraj98/indoor-training-set-its-residestandard \
+      --unzip -p "$TARGET_PATH"
+
+---
 
 # 2. Haze4K
-echo "Downloading: Haze4K-T (for training) ..."
-kaggle datasets download -d qwertydbooze/haze4k-t --unzip
-echo "Downloading: Haze4K-V (for validation) ..."
-kaggle datasets download -d qwertydbooze/haze4k-v --unzip
+# The Kaggle CLI will create folders for Haze4K-T and Haze4K-V based on the dataset name.
+# We direct the download to a subfolder named 'haze4k' inside the root 'dataset' folder.
+
+echo "Downloading: Haze4K-T (for training) and Haze4K-V (for validation)..."
+HAZE4K_PATH="$ROOT_DATASET/haze4k"
+mkdir -p "$HAZE4K_PATH"
+
+kaggle datasets download -d qwertydbooze/haze4k-t \
+      --unzip -p "$HAZE4K_PATH"
+kaggle datasets download -d qwertydbooze/haze4k-v \
+      --unzip -p "$HAZE4K_PATH"
+
+---
 
 # 3. DenseHaze
+FOLDER_NAME="dense-haze"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+
 echo "Downloading: DenseHaze..."
-kaggle datasets download -d sidhantpatel/densehaze --unzip
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
+      --unzip -p "$TARGET_PATH"
+
+---
 
 # 4. O-Haze 
-echo "Donwloading: O-Haze ... "
-kaggle datasets download -d philiphofmann/o-haze --unzip
+FOLDER_NAME="o-haze"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "✅ All downloads initiated. Files will appear in the current directory."
+echo "Downloading: O-Haze..."
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d philiphofmann/o-haze \
+      --unzip -p "$TARGET_PATH"
+
+---
+
+echo "✅ All downloads initiated. Check the '$ROOT_DATASET' folder for files."

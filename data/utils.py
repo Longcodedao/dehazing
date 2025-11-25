@@ -1,6 +1,7 @@
 import torch
 from torchvision.transforms import v2
 import math
+from typing import Union, Tuple
 
 
 def print_transform_summary(
@@ -25,6 +26,49 @@ def print_transform_summary(
     print("\n### 3. Common (Tensor Conversion & Normalization) Transforms:")
     print("Applied to both images before feeding to the model.")
     print(common)
+
+
+def restandardize_tensor(
+    tensor: torch.Tensor,
+    mean: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
+    std: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
+) -> torch.Tensor:
+    """
+    Reverses the normalization operation (z-score standardization) on an image tensor
+    to prepare it for visualization.
+
+    The reversal formula is: De-normalized Tensor = (Normalized Tensor * STD) + MEAN
+
+    Args:
+        tensor: The normalized image tensor (C, H, W) or (B, C, H, W).
+        mean: The mean used during normalization.
+        std: The standard deviation used during normalization.
+
+    Returns:
+        The de-normalized tensor, clipped to the range [0, 1].
+    """
+    # Ensure mean and std are tensors with the correct shape (C, 1, 1) for broadcasting
+    if not isinstance(mean, torch.Tensor):
+        mean = torch.tensor(mean, dtype=tensor.dtype, device=tensor.device).view(
+            -1, 1, 1
+        )
+    if not isinstance(std, torch.Tensor):
+        std = torch.tensor(std, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
+
+    # Handle batch dimension: unsqueeze mean/std if tensor is (B, C, H, W)
+    if tensor.dim() == 4:
+        # Add a batch dimension to mean/std for broadcasting across the batch
+        mean = mean.unsqueeze(0)
+        std = std.unsqueeze(0)
+
+    # 1. Reverse the Normalization (Multiply by STD, Add MEAN)
+    de_normalized_tensor = (tensor * std) + mean
+
+    # 2. Clamp the values to the valid [0, 1] range
+    # Necessary because model predictions might fall outside of [-1, 1] after de-normalization.
+    final_tensor = torch.clamp(de_normalized_tensor, 0.0, 1.0)
+
+    return final_tensor
 
 
 # --------------------------------------------------------------------------

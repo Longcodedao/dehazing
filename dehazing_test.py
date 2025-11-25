@@ -115,15 +115,12 @@ plt.show()
 
 
 # %%
-
-
-# %%
 resize_size = 256
 
-train_transform = get_haze_transforms(resize_size, split="train")
 print("Training Transform is:")
-print(train_transform)
-
+train_transform = get_haze_transforms(
+    dataset_name="RESIDE", resize_size=resize_size, split="train", verbose=True
+)
 reside_dataset = RESIDE_Indoor(
     dataset_path="dataset/indoor-training-set", transform=train_transform
 )
@@ -132,5 +129,29 @@ clean, hazy = first_instance
 
 print(f"Clean image has shape: {clean.shape}")
 print(f"Hazy image has shape: {hazy.shape}")
+
+# %%
+N_COLS = 2
+images_display = 5
+N_ROWS = images_display
+
+
+fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * N_ROWS))
+fig.suptitle("Clear (Ground Truth) and Hazy Image Comparison", fontsize=16)
+
+for i in range(images_display):
+    clean, hazy = reside_dataset[i]
+    clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
+    axes[i][0].imshow(clean_display)
+    axes[i][0].set_title(f"Clean {i}")
+    axes[i][0].axis("off")
+
+    axes[i][1].imshow(hazy_display)
+    axes[i][1].set_title(f"Hazy {i}")
+    axes[i][1].axis("off")
+
+# 6. Show the plot
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
+plt.show()
 
 # %%

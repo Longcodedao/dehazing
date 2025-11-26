@@ -181,8 +181,44 @@ def get_haze_transforms(
             print_transform_summary(
                 name=f"Validation/Test Split (Size: {resize_size}x{resize_size})",
                 geometric_sync=v2.Identity(),  # No random geometric transforms
-                haze_only=v2.Identity(),   # No color jitter/grayscale
+                haze_only=v2.Identity(),  # No color jitter/grayscale
                 common=common_transforms,
             )
         return val_transform
 
+
+def plotting_pair_images(dataset, num_instances=3, start_index=0, save_figure=False):
+    N_COLS = 2
+    N_ROWS = num_instances
+
+    end_index = start_index + num_instances
+    fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * N_ROWS))
+    fig.suptitle(
+        f"GT vs Haze Image Comparision in {dataset}",
+        fontsize=16,
+    )
+    row_index = 0
+    for i in range(start_index, end_index):
+        clean, hazy = dataset[i]
+        clean = restandardize_tensor(clean)
+        hazy = restandardize_tensor(hazy)
+        clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
+        axes[row_index][0].imshow(clean_display)
+        axes[row_index][0].set_title(f"Clean {i}")
+        axes[row_index][0].axis("off")
+
+        axes[row_index][1].imshow(hazy_display)
+        axes[row_index][1].set_title(f"Hazy {i}")
+        axes[row_index][1].axis("off")
+
+        row_index += 1
+
+    save_path = f"images/{dataset}_hazy_clear_comparison.png"
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
+
+    print(f"Saving visualization to: {save_path}")
+    plt.savefig(
+        save_path, dpi=300, bbox_inches="tight"
+    )  # Saves the figure with high resolution and tight bounds
+
+    plt.show()

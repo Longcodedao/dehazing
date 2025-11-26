@@ -2,11 +2,12 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
+from pathlib import Path
 
 
 class Haze4k_Dataset(Dataset):
     def __init__(self, root_dir, split="train", transform=None):
-        self.root_dir = root_dir
+        self.root_dir = Path(root_dir)
         data_folder = "Haze4K-T" if split == "train" else "Haze4K-V"
         self.dataset_dir = self.root_dir / data_folder
 
@@ -56,4 +57,3 @@ class Haze4k_Dataset(Dataset):
             )
 
         return clean_img, hazy_img
-

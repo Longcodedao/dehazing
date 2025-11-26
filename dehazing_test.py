@@ -18,7 +18,7 @@ import time
 import sys
 import math
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset, ConcatDataset
 from data import (
     get_haze_transforms,
     restandardize_tensor,
@@ -121,7 +121,6 @@ def partition_dataset(
 
 resize_size = 256
 
-print("Training Transform is:")
 train_transform = get_haze_transforms(
     dataset_name="RESIDE", resize_size=resize_size, split="train", verbose=True
 )
@@ -136,16 +135,25 @@ train_reside_dataset, val_reside_dataset = partition_dataset(
     reside_dataset, train_transform, val_transform, train_ratio=0.8
 )
 
-print(f"Length of RESIDE Train: {len(train_reside_dataset)}")
-print(f"Length of RESIDE Val: {len(val_reside_dataset)}")
+train_transform_haze4k = get_haze_transforms(
+    dataset_name="HAZE4K", resize_size=resize_size, split="train", verbose=True
+)
+val_transform_haze4k = get_haze_transforms(
+    dataset_name="HAZE4K", resize_size=resize_size, split="val", verbose=True
+)
 
+
+haze_4k_train = Haze4k_Dataset(
+    dataset_path="dataset/haze4k", split="train", transform=train_transform_haze4k
+)
+
+haze_4k_val = Haze4k_Dataset(
+    dataset_path="dataset/haze4k", split="val", transform=val_transform_haze4k
+)
+
+train_dataset = ConcatDataset([train_reside_dataset, haze_4k_train])
+val_dataset = ConcatDataset([val_reside_dataset, haze_4k_val])
 
 # %%
-print("Displaying Train RESIDE")
-plotting_pair_images(train_reside_dataset, save_figure=False)
-
-# %%
-print("Displaying Test RESIDE")
-plotting_pair_images(val_reside_dataset, save_figure=False)
-
-# %%
+print(f"Length of train dataset: {len(train_dataset)} ")
+print(f"Length of valid dataset: {len(val_dataset)}")

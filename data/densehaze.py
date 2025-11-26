@@ -2,11 +2,12 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
+from pathlib import Path
 
 
 class DENSE_Dataset(Dataset):
     def __init__(self, root_dir, transform=None):
-        self.dataset_dir = root_dir
+        self.dataset_dir = Path(root_dir)
         self.clear_img_paths = self.dataset_dir / "GT"
         self.hazy_img_paths = self.dataset_dir / "hazy"
         self.clear_paths = sorted(list(self.clear_img_paths.glob("*.png")))

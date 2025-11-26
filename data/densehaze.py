@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 
 
-class DENSE_Dataset(Dataset):
+class DENSE_Haze_Dataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.dataset_dir = Path(root_dir)
         self.clear_img_paths = self.dataset_dir / "GT"

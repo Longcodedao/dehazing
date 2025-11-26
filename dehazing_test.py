@@ -25,7 +25,7 @@ from data import (
     print_transform_summary,
     plotting_pair_images,
 )
-from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Dataset
+from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
 import copy
 
 # %%
@@ -48,50 +48,6 @@ def set_seed(seed):
 
 
 set_seed(42)
-
-# %%
-resize_size = 256
-
-print("Training Transform is:")
-train_transform = get_haze_transforms(
-    dataset_name="RESIDE", resize_size=resize_size, split="train", verbose=True
-)
-reside_dataset = RESIDE_Indoor(
-    dataset_path="dataset/indoor-training-set", transform=train_transform
-)
-plotting_pair_images(reside_dataset, save_figure=True)
-
-# %%
-## Testing loading Haze4K Dataset with transforms
-train_transform = get_haze_transforms(
-    dataset_name="HAZE4K", resize_size=256, split="train", verbose=True
-)
-
-haze4k_dataset = Haze4k_Dataset(
-    root_dir=Path("dataset/haze4k"), split="train", transform=train_transform
-)
-plotting_pair_images(haze4k_dataset, save_figure=True)
-
-# %%
-## Loading the O-HAZE Dataset with transforms
-val_transform = get_haze_transforms(
-    dataset_name="O-HAZE", resize_size=256, split="val", verbose=True
-)
-
-o_haze_path = Path("dataset/o-haze/O-HAZY/")
-o_haze_dataset = OHAZE_Dataset(root_dir=o_haze_path, transform=val_transform)
-plotting_pair_images(o_haze_dataset, save_figure=True)
-
-# %%
-## Loading the Dense Haze dataset
-densehaze_path = Path("dataset/dense-haze/")
-
-train_transform = get_haze_transforms(
-    dataset_name="DENSE-HAZE", resize_size=256, split="val", verbose=True
-)
-dense_haze = DENSE_Dataset(root_dir=densehaze_path, transform=train_transform)
-
-plotting_pair_images(dense_haze, save_figure=True)
 
 
 # %%
@@ -121,10 +77,11 @@ def partition_dataset(
 
 resize_size = 256
 
-train_transform = get_haze_transforms(
+# Loading the RESIDE Datset
+train_transform_reside = get_haze_transforms(
     dataset_name="RESIDE", resize_size=resize_size, split="train", verbose=True
 )
-val_transform = get_haze_transforms(
+val_transform_reside = get_haze_transforms(
     dataset_name="RESIDE", resize_size=resize_size, split="val", verbose=True
 )
 
@@ -132,9 +89,11 @@ reside_dataset = RESIDE_Indoor(
     dataset_path="dataset/indoor-training-set", transform=None
 )
 train_reside_dataset, val_reside_dataset = partition_dataset(
-    reside_dataset, train_transform, val_transform, train_ratio=0.8
+    reside_dataset, train_transform_reside, val_transform_reside, train_ratio=0.8
 )
 
+
+# Loading the Haze4k Dataset
 train_transform_haze4k = get_haze_transforms(
     dataset_name="HAZE4K", resize_size=resize_size, split="train", verbose=True
 )
@@ -142,13 +101,12 @@ val_transform_haze4k = get_haze_transforms(
     dataset_name="HAZE4K", resize_size=resize_size, split="val", verbose=True
 )
 
-
 haze_4k_train = Haze4k_Dataset(
-    dataset_path="dataset/haze4k", split="train", transform=train_transform_haze4k
+    root_dir="dataset/haze4k", split="train", transform=train_transform_haze4k
 )
 
 haze_4k_val = Haze4k_Dataset(
-    dataset_path="dataset/haze4k", split="val", transform=val_transform_haze4k
+    root_dir="dataset/haze4k", split="val", transform=val_transform_haze4k
 )
 
 train_dataset = ConcatDataset([train_reside_dataset, haze_4k_train])
@@ -157,3 +115,17 @@ val_dataset = ConcatDataset([val_reside_dataset, haze_4k_val])
 # %%
 print(f"Length of train dataset: {len(train_dataset)} ")
 print(f"Length of valid dataset: {len(val_dataset)}")
+
+# %%
+## Loading DenseHaze dataset
+
+transform_densehaze = get_haze_transforms(
+    dataset_name="DENSE-HAZE", resize_size=resize_size, split="val", verbose=True
+)
+
+dense_haze = DENSE_Haze_Dataset(
+    root_dir="dataset/dense_haze",
+    resize_size=resize_size,
+    transform=transform_densehaze,
+)
+print("Length of Dense Haze dataset is: ", len(dense_haze))

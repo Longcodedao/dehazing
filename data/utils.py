@@ -1,6 +1,7 @@
 import torch
 from torchvision.transforms import v2
 from typing import Union, Tuple
+import matplotlib.pyplot as plt
 
 
 def print_transform_summary(

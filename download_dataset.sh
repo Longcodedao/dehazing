@@ -72,7 +72,7 @@ ROOT_DATASET="dataset"
 echo "Creating root data directory: $ROOT_DATASET"
 mkdir -p "$ROOT_DATASET"
 
----
+# ---
 
 # 1. Indoor Training Set (ITS)
 FOLDER_NAME="indoor-training-set"
@@ -83,7 +83,7 @@ mkdir -p "$TARGET_PATH"
 kaggle datasets download -d balraj98/indoor-training-set-its-residestandard \
       --unzip -p "$TARGET_PATH"
 
----
+# ---
 
 # 2. Haze4K
 # The Kaggle CLI will create folders for Haze4K-T and Haze4K-V based on the dataset name.
@@ -98,7 +98,7 @@ kaggle datasets download -d qwertydbooze/haze4k-t \
 kaggle datasets download -d qwertydbooze/haze4k-v \
       --unzip -p "$HAZE4K_PATH"
 
----
+# ---
 
 # 3. DenseHaze
 FOLDER_NAME="dense-haze"
@@ -109,7 +109,7 @@ mkdir -p "$TARGET_PATH"
 kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
       --unzip -p "$TARGET_PATH"
 
----
+# ---
 
 # 4. O-Haze 
 FOLDER_NAME="o-haze"
@@ -120,6 +120,6 @@ mkdir -p "$TARGET_PATH"
 kaggle datasets download -d philiphofmann/o-haze \
       --unzip -p "$TARGET_PATH"
 
----
+# ---
 
 echo "✅ All downloads initiated. Check the '$ROOT_DATASET' folder for files."

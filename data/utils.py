@@ -1,6 +1,5 @@
 import torch
 from torchvision.transforms import v2
-import math
 from typing import Union, Tuple
 
 

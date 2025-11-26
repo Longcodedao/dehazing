@@ -71,8 +71,6 @@ def restandardize_tensor(
 
 
 # --------------------------------------------------------------------------
-
-
 def get_haze_transforms(
     dataset_name: str,
     resize_size: int = 640,
@@ -174,15 +172,17 @@ def get_haze_transforms(
 
     else:  # split == "val" or "test"
         # --- Handle Validation/Test Split ---
+        def val_transform(clear_img, hazy_img):
+            clean_img = common_transforms(clear_img)
+            hazy_img = common_transforms(hazy_img)
+            return clean_img, hazy_img
+
         if verbose:
             print_transform_summary(
                 name=f"Validation/Test Split (Size: {resize_size}x{resize_size})",
-                geometric_sync=v2.Compose([]),  # No random geometric transforms
-                hazy_only=v2.Compose([]),  # No color jitter/grayscale
+                geometric_sync=v2.Identity(),  # No random geometric transforms
+                haze_only=v2.Identity(),   # No color jitter/grayscale
                 common=common_transforms,
             )
-        return (
-            common_transforms  # Returns the Compose object for single-image application
-        )
-        # Note: In this case, your Dataset.__getitem__ would need
-        # to apply it to both images separately.
+        return val_transform
+

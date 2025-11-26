@@ -2,6 +2,8 @@ import torch
 from torchvision.transforms import v2
 from typing import Union, Tuple
 import matplotlib.pyplot as plt
+import copy
+from torch.utils.data import Subset, Dataset
 
 
 def print_transform_summary(
@@ -186,6 +188,29 @@ def get_haze_transforms(
                 common=common_transforms,
             )
         return val_transform
+
+
+def partition_dataset(
+    dataset: Dataset,
+    train_transform: callable,
+    val_transform: callable,
+    train_ratio=0.8,
+):
+    indices = torch.randperm(len(dataset)).tolist()
+    num_train = int(len(dataset) * train_ratio)
+    train_indices = indices[:num_train]
+    val_indices = indices[num_train:]
+
+    train_dataset_base = copy.deepcopy(dataset)
+    val_dataset_base = copy.deepcopy(dataset)
+
+    train_dataset_base.transform = train_transform
+    val_dataset_base.transform = val_transform
+
+    train_subset = Subset(train_dataset_base, train_indices)
+    val_subset = Subset(val_dataset_base, val_indices)
+
+    return train_subset, val_subset
 
 
 def plotting_pair_images(dataset, num_instances=3, start_index=0, save_figure=False):

@@ -9,8 +9,6 @@ from torchvision.transforms import v2
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 from torchdiffeq import odeint
 import random
-import numpy as np
-import pandas as pd
 from tqdm.notebook import tqdm
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -18,15 +16,16 @@ import time
 import sys
 import math
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader, Subset, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset
 from data import (
     get_haze_transforms,
     restandardize_tensor,
     print_transform_summary,
     plotting_pair_images,
+    partition_dataset,
 )
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
-import copy
+
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -35,6 +34,7 @@ WEIGHT_DECAY = 1e-4
 B1, B2 = 0.5, 0.999
 W_FLOW, W_MSE, W_PERC, W_ADV = 1.0, 1.0, 0.1, 0.01
 TIME_LIMIT_HOURS = 11.5
+BATCH_SIZE = 256
 
 
 # %%
@@ -52,27 +52,6 @@ set_seed(42)
 
 # %%
 ## Training process
-def partition_dataset(
-    dataset: Dataset,
-    train_transform: callable,
-    val_transform: callable,
-    train_ratio=0.8,
-):
-    indices = torch.randperm(len(dataset)).tolist()
-    num_train = int(len(dataset) * train_ratio)
-    train_indices = indices[:num_train]
-    val_indices = indices[num_train:]
-
-    train_dataset_base = copy.deepcopy(dataset)
-    val_dataset_base = copy.deepcopy(dataset)
-
-    train_dataset_base.transform = train_transform
-    val_dataset_base.transform = val_transform
-
-    train_subset = Subset(train_dataset_base, train_indices)
-    val_subset = Subset(val_dataset_base, val_indices)
-
-    return train_subset, val_subset
 
 
 resize_size = 256
@@ -124,8 +103,34 @@ transform_densehaze = get_haze_transforms(
 )
 
 dense_haze = DENSE_Haze_Dataset(
-    root_dir="dataset/dense_haze",
-    resize_size=resize_size,
-    transform=transform_densehaze,
+    root_dir="dataset/dense-haze", transform=transform_densehaze
 )
 print("Length of Dense Haze dataset is: ", len(dense_haze))
+
+# %%
+transform_ohaze = get_haze_transforms(
+    dataset_name="OHAZE", resize_size=resize_size, split="val", verbose=True
+)
+o_haze = OHAZE_Dataset(root_dir="dataset/o-haze/O-HAZY", transform=transform_densehaze)
+print("Length of O Haze dataset is: ", len(o_haze))
+
+# %%
+## Loader dataset
+train_loader = DataLoader(
+    train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True
+)
+val_loader = DataLoader(
+    val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True
+)
+dense_haze_loader = DataLoader(dense_haze, batch_size=16, shuffle=False, num_workers=4)
+o_haze_loader = DataLoader(o_haze, batch_size=16, shuffle=False, num_workers=4)
+
+
+## Test Loader
+first_train_loader = next(iter(train_loader))
+clean, hazy = first_train_loader
+print(f"Clean batch has shape: {clean.shape}")
+print(f"Hazy batch has shape: {hazy.shape}")
+
+# %%
+## Learning model to implement

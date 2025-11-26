@@ -5,8 +5,8 @@ haze4k-t.zip
 indoor-training-set-its-residestandard.zip
 uv.lock
 
-./id_ed25519
-./id_ed25519.pub
+id_ed25519
+id_ed25519.pub
 
 id_rsa
 id_rsa.pub

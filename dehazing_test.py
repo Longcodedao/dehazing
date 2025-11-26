@@ -20,7 +20,7 @@ import math
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
 from data import get_haze_transforms, restandardize_tensor, print_transform_summary
-from data import RESIDE_Indoor, Haze4k_Dataset
+from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Dataset
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -323,55 +323,6 @@ print("Total Hazy Images: ", len(haze_img_path))
 
 
 # %%
-class OHAZE_Dataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.dataset_dir = root_dir
-        self.clear_img_paths = self.dataset_dir / "GT"
-        self.hazy_img_paths = self.dataset_dir / "hazy"
-        self.clear_paths = sorted(list(self.clear_img_paths.glob("*.jpg")))
-        self.hazy_paths = sorted(list(self.hazy_img_paths.glob("*.jpg")))
-
-        self.data = []
-
-        for i in range(len(self.clear_paths)):
-            data_index = {
-                "index": i,
-                "clean": self.clear_paths[i],
-                "hazy": self.hazy_paths[i],
-            }
-            self.data.append(data_index)
-
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        data_item = self.data[idx]
-        clean_path = data_item["clean"]
-        hazy_path = data_item["hazy"]
-
-        try:
-            clean_img = Image.open(clean_path).convert("RGB")
-            hazy_img = Image.open(hazy_path).convert("RGB")
-        except FileNotFoundError:
-            print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
-            return self.__getitem__((idx + 1) % len(self))
-
-        if self.transform:
-            clean_img, hazy_img = self.transform(clean_img, hazy_img)
-        else:
-            clean_img = (
-                torch.as_tensor(np.array(clean_img)).permute(2, 0, 1).float() / 255.0
-            )
-            hazy_img = (
-                torch.as_tensor(np.array(hazy_img)).permute(2, 0, 1).float() / 255.0
-            )
-
-        return clean_img, hazy_img
-
-
-# %%
 ## Loading the O-HAZE Dataset with transforms
 val_transform = get_haze_transforms(
     dataset_name="O-HAZE", resize_size=256, split="test", verbose=True
@@ -423,54 +374,6 @@ plt.show()
 
 # %%
 ## Loading the Dense Haze dataset
-class DENSE_Dataset(Dataset):
-    def __init__(self, root_dir, transform=None):
-        self.dataset_dir = root_dir
-        self.clear_img_paths = self.dataset_dir / "GT"
-        self.hazy_img_paths = self.dataset_dir / "hazy"
-        self.clear_paths = sorted(list(self.clear_img_paths.glob("*.png")))
-        self.hazy_paths = sorted(list(self.hazy_img_paths.glob("*.png")))
-
-        self.data = []
-
-        for i in range(len(self.clear_paths)):
-            data_index = {
-                "index": i,
-                "clean": self.clear_paths[i],
-                "hazy": self.hazy_paths[i],
-            }
-            self.data.append(data_index)
-
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        data_item = self.data[idx]
-        clean_path = data_item["clean"]
-        hazy_path = data_item["hazy"]
-
-        try:
-            clean_img = Image.open(clean_path).convert("RGB")
-            hazy_img = Image.open(hazy_path).convert("RGB")
-        except FileNotFoundError:
-            print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
-            return self.__getitem__((idx + 1) % len(self))
-
-        if self.transform:
-            clean_img, hazy_img = self.transform(clean_img, hazy_img)
-        else:
-            clean_img = (
-                torch.as_tensor(np.array(clean_img)).permute(2, 0, 1).float() / 255.0
-            )
-            hazy_img = (
-                torch.as_tensor(np.array(hazy_img)).permute(2, 0, 1).float() / 255.0
-            )
-
-        return clean_img, hazy_img
-
-
 densehaze_path = Path("dataset/dense-haze/")
 
 train_transform = get_haze_transforms(
@@ -478,44 +381,43 @@ train_transform = get_haze_transforms(
 )
 dense_haze = DENSE_Dataset(root_dir=densehaze_path, transform=train_transform)
 
-N_COLS = 2
-images_display = 3
-N_ROWS = images_display
-start_index = 10
-end_index = start_index + images_display
 
-fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * N_ROWS))
-fig.suptitle(
-    "Clear (Ground Truth) and Hazy Image Comparison (In the DENSE-HAZE Dataset)",
-    fontsize=16,
-)
+def plotting_pair_images(dataset, num_instances=3, start_index=0, save_figure=False):
+    N_COLS = 2
+    N_ROWS = num_instances
 
-row_index = 0
-for i in range(start_index, end_index):
-    clean, hazy = dense_haze[i]
-    clean = restandardize_tensor(clean)
-    hazy = restandardize_tensor(hazy)
-    clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
-    axes[row_index][0].imshow(clean_display)
-    axes[row_index][0].set_title(f"Clean {i}")
-    axes[row_index][0].axis("off")
+    end_index = start_index + num_instances
+    fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * ROWS))
+    fig.suptitle(
+        f"GT vs Haze Image Comparision in {dataset}",
+        font_size=16,
+    )
+    row_index = 0
+    for i in range(start_index, end_index):
+        clean, hazy = dense_haze[i]
+        clean = restandardize_tensor(clean)
+        hazy = restandardize_tensor(hazy)
+        clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
+        axes[row_index][0].imshow(clean_display)
+        axes[row_index][0].set_title(f"Clean {i}")
+        axes[row_index][0].axis("off")
 
-    axes[row_index][1].imshow(hazy_display)
-    axes[row_index][1].set_title(f"Hazy {i}")
-    axes[row_index][1].axis("off")
+        axes[row_index][1].imshow(hazy_display)
+        axes[row_index][1].set_title(f"Hazy {i}")
+        axes[row_index][1].axis("off")
 
-    row_index += 1
-# 6. Save the plot
-save_path = "images/dense_haze_val_hazy_clear_comparison.png"
-plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
+        row_index += 1
 
-# 7. Add the save command
-print(f"Saving visualization to: {save_path}")
-plt.savefig(
-    save_path, dpi=300, bbox_inches="tight"
-)  # Saves the figure with high resolution and tight bounds
+    save_path = f"images/{dataset}_hazy_clear_comparison.png"
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
 
-# 8. Show the plot
-plt.show()
+    print(f"Saving visualization to: {save_path}")
+    plt.savefig(
+        save_path, dpi=300, bbox_inches="tight"
+    )  # Saves the figure with high resolution and tight bounds
 
+    plt.show()
+
+
+plotting_pair_images(dense_haze, save_figure=True)
 # %%

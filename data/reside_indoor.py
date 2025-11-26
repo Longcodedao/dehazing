@@ -28,6 +28,9 @@ class RESIDE_Indoor(Dataset):
 
                 self.data.append(data_item)
 
+    def __repr__(self):
+        return "RESIDE Indoor"
+
     def __len__(self):
         return len(self.data)
 

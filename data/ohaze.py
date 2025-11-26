@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import numpy as np
 
+
 class OHAZE_Dataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.dataset_dir = root_dir
@@ -22,6 +23,9 @@ class OHAZE_Dataset(Dataset):
             self.data.append(data_index)
 
         self.transform = transform
+
+    def __repr__(self):
+        return "O-HAZE"
 
     def __len__(self):
         return len(self.data)

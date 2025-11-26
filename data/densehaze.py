@@ -24,6 +24,9 @@ class DENSE_Dataset(Dataset):
 
         self.transform = transform
 
+    def __repr__(self):
+        return "DENSE Haze"
+
     def __len__(self):
         return len(self.data)
 

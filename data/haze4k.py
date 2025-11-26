@@ -27,6 +27,9 @@ class Haze4k_Dataset(Dataset):
 
         self.transform = transform
 
+    def __repr__(self):
+        return "HAZE-4K"
+
     def __len__(self):
         return len(self.data)
 
@@ -53,3 +56,4 @@ class Haze4k_Dataset(Dataset):
             )
 
         return clean_img, hazy_img
+

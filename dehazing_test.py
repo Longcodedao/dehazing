@@ -19,7 +19,7 @@ import sys
 import math
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
-from data import RESIDE_Indoor, get_haze_transforms
+from data import RESIDE_Indoor, get_haze_transforms, restandardize_tensor
 from typing import Union, Tuple
 
 # %%
@@ -133,47 +133,49 @@ print(f"Hazy image has shape: {hazy.shape}")
 # %%
 
 
-def restandardize_tensor(
-    tensor: torch.Tensor,
-    mean: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
-    std: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
-) -> torch.Tensor:
-    """
-    Reverses the normalization operation (z-score standardization) on an image tensor
-    to prepare it for visualization.
+#def restandardize_tensor(
+#    tensor: torch.Tensor,
+#    mean: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
+#    std: Union[torch.Tensor, Tuple[float, float, float]] = [0.5, 0.5, 0.5],
+#) -> torch.Tensor:
+#    """
+#    Reverses the normalization operation (z-score standardization) on an image tensor
+#    to prepare it for visualization.
+#
+#    The reversal formula is: De-normalized Tensor = (Normalized Tensor * STD) + MEAN
+#
+#    Args:
+#        tensor: The normalized image tensor (C, H, W) or (B, C, H, W).
+#        mean: The mean used during normalization.
+#        std: The standard deviation used during normalization.
+#
+#    Returns:
+#        The de-normalized tensor, clipped to the range [0, 1].
+#    """
+#    # Ensure mean and std are tensors with the correct shape (C, 1, 1) for broadcasting
+#    if not isinstance(mean, torch.Tensor):
+#        mean = torch.tensor(mean, dtype=tensor.dtype, device=tensor.device).view(
+#            -1, 1, 1
+#        )
+#    if not isinstance(std, torch.Tensor):
+#        std = torch.tensor(std, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
+#
+#    # Handle batch dimension: unsqueeze mean/std if tensor is (B, C, H, W)
+#    if tensor.dim() == 4:
+#        # Add a batch dimension to mean/std for broadcasting across the batch
+#        mean = mean.unsqueeze(0)
+#        std = std.unsqueeze(0)
+#
+#    # 1. Reverse the Normalization (Multiply by STD, Add MEAN)
+#    de_normalized_tensor = (tensor * std) + mean
+#
+#    # 2. Clamp the values to the valid [0, 1] range
+#    # Necessary because model predictions might fall outside of [-1, 1] after de-normalization.
+#    final_tensor = torch.clamp(de_normalized_tensor, 0.0, 1.0)
+#
+#    return final_tensor
+#
 
-    The reversal formula is: De-normalized Tensor = (Normalized Tensor * STD) + MEAN
-
-    Args:
-        tensor: The normalized image tensor (C, H, W) or (B, C, H, W).
-        mean: The mean used during normalization.
-        std: The standard deviation used during normalization.
-
-    Returns:
-        The de-normalized tensor, clipped to the range [0, 1].
-    """
-    # Ensure mean and std are tensors with the correct shape (C, 1, 1) for broadcasting
-    if not isinstance(mean, torch.Tensor):
-        mean = torch.tensor(mean, dtype=tensor.dtype, device=tensor.device).view(
-            -1, 1, 1
-        )
-    if not isinstance(std, torch.Tensor):
-        std = torch.tensor(std, dtype=tensor.dtype, device=tensor.device).view(-1, 1, 1)
-
-    # Handle batch dimension: unsqueeze mean/std if tensor is (B, C, H, W)
-    if tensor.dim() == 4:
-        # Add a batch dimension to mean/std for broadcasting across the batch
-        mean = mean.unsqueeze(0)
-        std = std.unsqueeze(0)
-
-    # 1. Reverse the Normalization (Multiply by STD, Add MEAN)
-    de_normalized_tensor = (tensor * std) + mean
-
-    # 2. Clamp the values to the valid [0, 1] range
-    # Necessary because model predictions might fall outside of [-1, 1] after de-normalization.
-    final_tensor = torch.clamp(de_normalized_tensor, 0.0, 1.0)
-
-    return final_tensor
 
 
 # %%
@@ -275,6 +277,8 @@ class Haze4k_Dataset(Dataset):
             }
             self.data.append(data_index)
 
+        self.transform = transform
+
     def __len__(self):
         return len(self.data)
 
@@ -301,3 +305,51 @@ class Haze4k_Dataset(Dataset):
             )
 
         return clean_img, hazy_img
+
+# %%
+train_transform = get_haze_transforms(
+    dataset_name = "HAZE4K", resize_size = 256, split = "train", verbose = True
+)
+
+haze_dataset = Haze4k_Dataset(root_dir=Path("dataset/haze4k"), split="train", transform = train_transform)
+
+N_COLS = 2
+images_display = 4
+N_ROWS = images_display
+start_index = 10
+end_index = start_index + images_display
+
+fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * N_ROWS))
+fig.suptitle(
+    "Clear (Ground Truth) and Hazy Image Comparison (In the Haze4K Dataset)",
+    fontsize=16,
+)
+
+row_index = 0
+for i in range(start_index, end_index):
+    clean, hazy = haze_dataset[i]
+    clean = restandardize_tensor(clean)
+    hazy = restandardize_tensor(hazy)
+    clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
+    axes[row_index][0].imshow(clean_display)
+    axes[row_index][0].set_title(f"Clean {i}")
+    axes[row_index][0].axis("off")
+
+    axes[row_index][1].imshow(hazy_display)
+    axes[row_index][1].set_title(f"Hazy {i}")
+    axes[row_index][1].axis("off")
+
+    row_index += 1
+# 6. Save the plot
+save_path = "images/haze4k_hazy_clear_comparison.png"
+plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
+
+# 7. Add the save command
+print(f"Saving visualization to: {save_path}")
+plt.savefig(
+    save_path, dpi=300, bbox_inches="tight"
+)  # Saves the figure with high resolution and tight bounds
+
+# 8. Show the plot
+plt.show()
+# %%

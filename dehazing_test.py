@@ -18,7 +18,7 @@ import time
 import sys
 import math
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from data import (
     get_haze_transforms,
     restandardize_tensor,
@@ -26,6 +26,7 @@ from data import (
     plotting_pair_images,
 )
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Dataset
+import copy
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -48,47 +49,6 @@ def set_seed(seed):
 
 set_seed(42)
 
-
-# %%
-## visualization
-# def plotting_pair_images(dataset, num_instances=3, start_index=0, save_figure=False):
-#    N_COLS = 2
-#    N_ROWS = num_instances
-#
-#    end_index = start_index + num_instances
-#    fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(4 * N_COLS, 5 * N_ROWS))
-#    fig.suptitle(
-#        f"GT vs Haze Image Comparision in {dataset}",
-#        fontsize=16,
-#    )
-#    row_index = 0
-#    for i in range(start_index, end_index):
-#        clean, hazy = dataset[i]
-#        clean = restandardize_tensor(clean)
-#        hazy = restandardize_tensor(hazy)
-#        clean_display, hazy_display = clean.permute(1, 2, 0), hazy.permute(1, 2, 0)
-#        axes[row_index][0].imshow(clean_display)
-#        axes[row_index][0].set_title(f"Clean {i}")
-#        axes[row_index][0].axis("off")
-#
-#        axes[row_index][1].imshow(hazy_display)
-#        axes[row_index][1].set_title(f"Hazy {i}")
-#        axes[row_index][1].axis("off")
-#
-#        row_index += 1
-#
-#    save_path = f"images/{dataset}_hazy_clear_comparison.png"
-#    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
-#
-#    if save_figure:
-#        print(f"Saving visualization to: {save_path}")
-#        plt.savefig(
-#            save_path, dpi=300, bbox_inches="tight"
-#        )  # Saves the figure with high resolution and tight bounds
-#
-#    plt.show()
-
-
 # %%
 resize_size = 256
 
@@ -101,7 +61,6 @@ reside_dataset = RESIDE_Indoor(
 )
 plotting_pair_images(reside_dataset, save_figure=True)
 
-
 # %%
 ## Testing loading Haze4K Dataset with transforms
 train_transform = get_haze_transforms(
@@ -112,7 +71,6 @@ haze4k_dataset = Haze4k_Dataset(
     root_dir=Path("dataset/haze4k"), split="train", transform=train_transform
 )
 plotting_pair_images(haze4k_dataset, save_figure=True)
-
 
 # %%
 ## Loading the O-HAZE Dataset with transforms
@@ -134,4 +92,60 @@ train_transform = get_haze_transforms(
 dense_haze = DENSE_Dataset(root_dir=densehaze_path, transform=train_transform)
 
 plotting_pair_images(dense_haze, save_figure=True)
+
+
+# %%
+## Training process
+def partition_dataset(
+    dataset: Dataset,
+    train_transform: callable,
+    val_transform: callable,
+    train_ratio=0.8,
+):
+    indices = torch.randperm(len(dataset)).tolist()
+    num_train = int(len(dataset) * train_ratio)
+    train_indices = indices[:num_train]
+    val_indices = indices[num_train:]
+
+    train_dataset_base = copy.deepcopy(dataset)
+    val_dataset_base = copy.deepcopy(dataset)
+
+    train_dataset_base.transform = train_transform
+    val_dataset_base.transform = val_transform
+
+    train_subset = Subset(train_dataset_base, train_indices)
+    val_subset = Subset(val_dataset_base, val_indices)
+
+    return train_subset, val_subset
+
+
+resize_size = 256
+
+print("Training Transform is:")
+train_transform = get_haze_transforms(
+    dataset_name="RESIDE", resize_size=resize_size, split="train", verbose=True
+)
+val_transform = get_haze_transforms(
+    dataset_name="RESIDE", resize_size=resize_size, split="val", verbose=True
+)
+
+reside_dataset = RESIDE_Indoor(
+    dataset_path="dataset/indoor-training-set", transform=None
+)
+train_reside_dataset, val_reside_dataset = partition_dataset(
+    reside_dataset, train_transform, val_transform, train_ratio=0.8
+)
+
+print(f"Length of RESIDE Train: {len(train_reside_dataset)}")
+print(f"Length of RESIDE Val: {len(val_reside_dataset)}")
+
+
+# %%
+print("Displaying Train RESIDE")
+plotting_pair_images(train_reside_dataset, save_figure=False)
+
+# %%
+print("Displaying Test RESIDE")
+plotting_pair_images(val_reside_dataset, save_figure=False)
+
 # %%

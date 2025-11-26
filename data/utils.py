@@ -217,9 +217,10 @@ def plotting_pair_images(dataset, num_instances=3, start_index=0, save_figure=Fa
     save_path = f"images/{dataset}_hazy_clear_comparison.png"
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # Adjust layout for suptitle
 
-    print(f"Saving visualization to: {save_path}")
-    plt.savefig(
-        save_path, dpi=300, bbox_inches="tight"
-    )  # Saves the figure with high resolution and tight bounds
+    if save_figure:
+        print(f"Saving visualization to: {save_path}")
+        plt.savefig(
+            save_path, dpi=300, bbox_inches="tight"
+        )  # Saves the figure with high resolution and tight bounds
 
     plt.show()

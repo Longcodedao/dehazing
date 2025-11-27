@@ -25,6 +25,7 @@ from data import (
     partition_dataset,
 )
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
+from einops import rearrange
 
 
 # %%
@@ -132,5 +133,189 @@ clean, hazy = first_train_loader
 print(f"Clean batch has shape: {clean.shape}")
 print(f"Hazy batch has shape: {hazy.shape}")
 
+
 # %%
 ## Learning model to implement
+class SinusoidalPosEmb(nn.Module):
+    """
+    Note that the implementation is a little bit different from the
+    Transformers paper but when fed in the linear layers, they learn the weighted
+    sums accross the entire input vector
+    => All positional information are fully encoded
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+
+        exponential_denominator = half_dim - 1
+        log_base = math.log(10000.0)
+        c = log_base / (exponential_denominator)
+
+        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
+        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
+
+        # Apply the frequencies to the input scaler (t)
+        # t has shape (batch_size, 1) and frequencies has shape (1, half_dim)
+        arguments = x[:, None] * frequencies[None, :]
+
+        return torch.cat((arguments.sin(), arguments.cos()), dim=-1)
+
+    def forward_original(self, x):
+        device = x.device
+        half_dim = self.dim // 2
+
+        exponential_denominator = half_dim - 1
+        log_base = math.log(10000.0)
+        c = log_base / (exponential_denominator)
+
+        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
+        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
+
+        arguments = x[:, None] * frequencies[None, :]
+
+        sin_component = arguments.sin()
+        cos_component = arguments.cos()
+
+        stacked = torch.stack((sin_component, cos_component), dim=-1)
+
+        # Reshape(batch_size, half_dim, 2) to (batch_size, half_dim * 2)
+        # Collapsing the final dimension and let those elements interleaved together
+        interleaved_eb = stacked.view(x.shape[0], -1)
+        return interleaved_eb
+
+
+batch_size = 32
+x = torch.tensor([1, 50, 100, 500])
+
+sinsoid_emb = SinusoidalPosEmb(256)
+pos_emb_1 = sinsoid_emb(x)
+pos_emb_2 = sinsoid_emb.forward_original(x)
+
+print("Shape of this is: ", sinsoid_emb(x).shape)
+print(f"First example 1 is: {pos_emb_1[0][:10]}")
+print(f"First example 2 is: {pos_emb_2[0][:10]}")
+
+
+# %%
+def convert_to_embedding(x, n_heads):
+    """
+    Args
+    x is a Tensor has shape (b, n_heads * c, h, w)
+
+    Returns:
+    out: Tensor with shape (b, n_heads, h * w, c)
+    """
+    b, _, h, w = x.shape
+    out = rearrange(x, "b (n_heads c) h w -> b n_heads (h w) c", n_heads=n_heads)
+    return out
+
+
+n_heads = 4
+dim = 64
+q = torch.randn(32, dim * n_heads, 16, 16)
+out_q = convert_to_embedding(q, n_heads)
+
+print("Shape of the out q is: ", out_q.shape)
+
+
+# %%
+class ResNetBlock(nn.Module):
+    def __init__(self, dim, dim_out, time_emb_dim=None, groups=8):
+        super().__init__()
+        self.time_mlp = (
+            nn.Sequential(nn.Linear(time_emb_dim, dim_out), nn.SiLU())
+            if time_emb_dim
+            else None
+        )
+        self.block1 = nn.Sequential(
+            nn.Conv2d(dim, dim_out, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, dim_out),
+            nn.SiLU(),
+        )
+        self.block2 = nn.Sequential(
+            nn.Conved(dim_out, dim_out, kernel_size=3, padding=1),
+            nn.GroupNorm(groups, dim_out),
+            nn.SiLU(),
+        )
+        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+
+    def forward(self, x, time_embed=None):
+        h = self.block1(x)
+        if self.mlp and time_embed:
+            h = h + self.mlp(self)[:, :, None, None]
+        h = self.block(h)
+        shortcut_h = self.res_conv(x)
+        return h + shortcut_h
+
+
+# %%
+class AttentionBlock(nn.Module):
+    def __init__(self, dim, heads=4, dim_head=32, groups=8):
+        super().__init__()
+        self.scale = int(dim_head ** (-0.5))
+        self.heads = heads
+        hidden_dim = heads * dim_head
+
+        # Add Multi-Scale Context
+        # We are going to diversify the context field by embedding
+        # multi convolution with different dilations
+        internal_dim = dim // 4
+        self.msc_conv1 = nn.Conv2d(
+            dim, internal_dim, kernel_size=3, padding=1, dilation=1
+        )
+        self.msc_conv2 = nn.Conv2d(
+            dim, internal_dim, kernel_size=3, padding=2, dilation=2
+        )
+        self.msc_conv3 = nn.Conv2d(
+            dim, internal_dim, kernel_size=3, padding=4, dilation=4
+        )
+        self.msc_conv4 = nn.Conv2d(
+            dim, dim - (3 * internal_dim), kernel_size=3, padding=1, dilation=1
+        )
+
+        self.msc_merge = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, kernel_size=1), nn.GroupNorm(groups, dim), nn.SiLU()
+        )
+
+        # Input the Attention Mechanism
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel=1, bias=False)
+        self.out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        # Multi-Scale context step
+        x1 = self.msc_conv1(x)
+        x2 = self.msc_conv2(x)
+        x3 = self.msc_conv3(x)
+        x4 = self.msc_conv4(x)
+
+        x_merge = torch.concatenate([x1, x2, x3, x4], dim=1)
+        x_enhanced = torch.concatenate([x, x_merge], dim=1)
+        x_enhanced = self.msc_merge(x_enhanced)
+
+        q, k, v = self.to_qkv(x_enhanced).chunk(3, dim=1)
+        q = rearrange(q, "b (heads c) h w -> b heads (h w) c", heads=self.heads)
+        k = rearrange(
+            k,
+        )
+
+
+# %%
+# class UNet(nn.Module):
+#    def __init__(self, dim=64, channels=3, dim_mults=(1, 2, 4, 8)):
+#        super().__init__()
+#        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
+#        self.time_mlp = nn.
+
+# %%
+a, b, c = torch.randn(32, 64 * 3, 256, 256).chunk(3, dim=1)
+print(a.shape)
+print(b.shape)
+print(c.shape)
+# %%

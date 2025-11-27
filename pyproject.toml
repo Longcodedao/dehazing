@@ -39,6 +39,7 @@ dependencies = [
   "tqdm>=4.67.1",
   "kaggle>=1.8.0",
   "einops>=0.8.1",
+  "jupyter>=1.1.1",
 ]
 
 # --- UV-specific Configuration ---

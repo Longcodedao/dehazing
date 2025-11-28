@@ -26,7 +26,7 @@ from data import (
 )
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
 from einops import rearrange
-
+import json
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -238,7 +238,7 @@ class ResNetBlock(nn.Module):
             nn.SiLU(),
         )
         self.block2 = nn.Sequential(
-            nn.Conved(dim_out, dim_out, kernel_size=3, padding=1),
+            nn.Conv2d(dim_out, dim_out, kernel_size=3, padding=1),
             nn.GroupNorm(groups, dim_out),
             nn.SiLU(),
         )
@@ -246,18 +246,30 @@ class ResNetBlock(nn.Module):
 
     def forward(self, x, time_embed=None):
         h = self.block1(x)
-        if self.mlp and time_embed:
-            h = h + self.mlp(self)[:, :, None, None]
-        h = self.block(h)
+        if self.time_mlp is not None and time_embed is not None:
+            h = h + self.time_mlp(time_embed)[:, :, None, None]
+        h = self.block2(h)
         shortcut_h = self.res_conv(x)
         return h + shortcut_h
+
+
+# batch_size = 32
+# t = torch.rand(batch_size)
+# sinusoid_embed = SinusoidalPosEmb(dim=256)
+# time_embed = sinusoid_embed.forward_original(t)
+#
+# x = torch.randn(batch_size, 64, 16, 16)
+# resnet_block = ResNetBlock(dim=64, dim_out=128, time_emb_dim=256)
+# output = resnet_block(x, time_embed)
+
+# print(f"Shape of the output is: {output.shape}")
 
 
 # %%
 class AttentionBlock(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32, groups=8):
         super().__init__()
-        self.scale = int(dim_head ** (-0.5))
+        self.scale = dim_head ** (-0.5)
         self.heads = heads
         hidden_dim = heads * dim_head
 
@@ -283,8 +295,8 @@ class AttentionBlock(nn.Module):
         )
 
         # Input the Attention Mechanism
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel=1, bias=False)
-        self.out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
+        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel_size=1, bias=False)
+        self.to_out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
 
     def forward(self, x):
         b, c, h, w = x.shape
@@ -300,18 +312,293 @@ class AttentionBlock(nn.Module):
         x_enhanced = self.msc_merge(x_enhanced)
 
         q, k, v = self.to_qkv(x_enhanced).chunk(3, dim=1)
-        q = rearrange(q, "b (heads c) h w -> b heads (h w) c", heads=self.heads)
-        k = rearrange(
-            k,
-        )
+        q = convert_to_embedding(q, self.heads)
+        k = convert_to_embedding(k, self.heads)
+        v = convert_to_embedding(v, self.heads)
+
+        q = q * self.scale
+        attention = torch.einsum("b h i d, b h j d -> b h i j", q, k)
+        attention = attention.softmax(dim=-1)
+        out = torch.einsum("b h i j, b h j d -> b h i d", attention, v)
+        out = out.permute(0, 1, 3, 2).reshape(b, -1, h, w)
+
+        return self.to_out(out) + x
+
+
+x = torch.randn(32, 64, 16, 16)
+attn_block = AttentionBlock(dim=64)
+
+result = attn_block(x)
+print("Output result of Attention Block is: ", result.shape)
 
 
 # %%
-# class UNet(nn.Module):
-#    def __init__(self, dim=64, channels=3, dim_mults=(1, 2, 4, 8)):
-#        super().__init__()
-#        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
-#        self.time_mlp = nn.
+class DownBlock(nn.Module):
+    def __init__(
+        self,
+        dim_in,
+        dim_out,
+        attn=False,
+        time_embed_dim=256,
+        num_heads=4,
+        dim_head=32,
+        groups=8,
+    ):
+        super().__init__()
+        self.res_block1 = ResNetBlock(
+            dim_in, dim_out, time_emb_dim=time_embed_dim, groups=groups
+        )
+        self.res_block2 = ResNetBlock(
+            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
+        )
+        self.attn = (
+            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
+            if attn
+            else nn.Identity()
+        )
+
+        self.downsample = nn.Conv2d(
+            dim_out, dim_out, kernel_size=4, stride=2, padding=1
+        )
+
+    def forward(self, x, t_emb):
+        x = self.res_block1(x, t_emb)
+        x = self.attn(x)
+        x = self.res_block2(x, t_emb)
+        x = self.downsample(x)
+
+        return x
+
+
+# %%
+class UpBlock(nn.Module):
+    def __init__(
+        self,
+        dim_in,
+        dim_skip,
+        dim_out,
+        attn=False,
+        time_embed_dim=256,
+        num_heads=4,
+        dim_head=32,
+        groups=8,
+    ):
+        super().__init__()
+        self.upsample = nn.Upsample(
+            scale_factor=2, mode="bilinear", align_corners=False
+        )
+        self.conv = nn.Conv2d(dim_in, dim_out, kernel_size=3, padding=1)
+
+        self.res_block1 = ResNetBlock(
+            dim_out + dim_skip, dim_out, time_emb_dim=time_embed_dim, groups=groups
+        )
+        self.res_block2 = ResNetBlock(
+            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
+        )
+        self.attn = (
+            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
+            if attn
+            else nn.Identity()
+        )
+
+    def forward(self, x, time_embed, skip):
+        x = self.upsample(x)
+        x = self.conv(x)
+        # Add the SKip connection from the Down layers
+        x = torch.concatenate([x, skip], dim=1)
+        # print("After Concatenating: ", x.shape)
+        x = self.res_block1(x, time_embed)
+        x = self.attn(x)
+        x = self.res_block2(x, time_embed)
+
+        return x
+
+
+# %%
+batch_size = 32
+t = torch.rand(batch_size)
+sinusoid_embed = SinusoidalPosEmb(dim=256)
+time_embed = sinusoid_embed.forward_original(t)
+
+print(f"Time embedding has shape: {time_embed.shape}")
+
+x = torch.randn(batch_size, 128, 16, 16)
+skip = torch.randn(batch_size, 128, 32, 32)
+upblock = UpBlock(dim_in=128, dim_skip=128, dim_out=64)
+output = upblock(x, time_embed, skip)
+print(f"THe size of output is: {output.shape}")
+
+
+# %%
+class UNet(nn.Module):
+    def __init__(self, dim=64, channels=3, dim_mults=(1, 2, 4, 8)):
+        super().__init__()
+        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(dim),
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, 256),
+        )
+
+        list_dims = [dim * m for m in dim_mults]
+        list_dims = [dim] + list_dims
+        in_out = list(zip(list_dims[:-1], list_dims[1:]))
+
+        self.downs = nn.ModuleList([])
+        self.ups = nn.ModuleList([])
+        for i, (d_in, d_out) in enumerate(in_out):
+            use_attn = i >= 2
+            self.downs.append(DownBlock(d_in, d_out, attn=use_attn))
+
+        self.mid_block1 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
+        self.mid_attn = AttentionBlock(list_dims[-1])
+        self.mid_block2 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
+
+        reversed_dim = list(reversed(list_dims))
+        up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
+        dim_skip = reversed_dim[1:]
+        print("Dim skip order is: ", dim_skip)
+        for i, (d_in, d_out) in enumerate(up_in_out):
+            use_attn = i < 2
+            self.ups.append(UpBlock(d_in, dim_skip[i], d_out, attn=use_attn))
+
+        self.final_conv = nn.Sequential(
+            ResNetBlock(dim, dim), nn.Conv2d(dim, channels, kernel_size=1)
+        )
+
+    def forward(self, x, t):
+        """
+        Args:
+        x: input of the haze image
+        t: Timeline
+
+        Returns: out: Clean image
+        """
+        t_emb = self.time_mlp(t)
+        x = self.init_conv(x)
+
+        skips = []
+        for down in self.downs:
+            skips.append(x)
+            x = down(x, t_emb)
+
+        x = self.mid_block1(x, t_emb)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, t_emb)
+
+        for up in self.ups:
+            skip = skips.pop()
+            #            print("Skip shape: ", skip.shape)
+            #            print("x shape: ", x.shape)
+            #            print("Time embed shape: ", t_emb.shape)
+
+            x = up(x, t_emb, skip)
+            # print("-------------")
+
+        out = self.final_conv(x)
+        return out
+
+
+device = "cpu"
+time_stamp = torch.rand(32).to(device)
+# sinusoid = SinusoidalPosEmb(dim=64)
+# print(sinusoid(time_stamp).shape)
+unet = UNet().to(device)
+x = torch.randn(32, 3, 256, 256).to(device)
+
+output = unet(x, time_stamp)
+print("Size of the output is: ", output.shape)
+
+
+# %%
+print(unet.ups)
+
+
+# %%
+## Implementing Flow Matching
+def path_sampler(x0, x1, t):
+    """
+    Args:
+        t: Timestamp uniformly sampled from [0, 1]: (B,)
+        x0: Hazy image
+        x1: Target image
+    Return:
+        x_t: Image transition at time t
+        u_t: Velocity constant from x0 to x1
+    """
+    t = t.reshape(-1, 1, 1, 1)
+    x_t = x0 * (1 - t) + x1 * t
+    u_t = x1 - x0
+
+    return x_t, u_t
+
+
+class ODESolver:
+    def __init__(self, model, nfe=20):
+        self.model = model
+        self.nfe = nfe
+
+    def ode_func(self, t, x):
+        # 1. Ensure the time 't' is a vector of size (B,)
+        # The ODE solver passes 't' as a scaler (if batching is not done internally)
+        # We must expand/broadcast it to match the batch size 'x'
+        t = t.expand(x.size(0))
+
+        # 2. Call the UNet (self.model)
+        # The UNet predicts the velocity field (v_theta) given the time and the
+        # image state
+        v_theta = self.model(t, x)
+
+        return v_theta
+
+    @torch.no_grad()
+    def sample(self, x_init):
+        # 1. Define the time span for integration (from 0 to 1, in nfe steps)
+        t_span = torch.linspace(0, 1, self.nfe, device=x_init.device)
+
+        # 2. Define the ODE function for the solver to use
+        # The solver requires a function (t, x) -> dx/dt
+        # We can use the method we just defined:
+        ode_func = self.ode_func
+
+        # 3. Perform the ODE integration
+        solution = odeint(
+            ode_func, x_init, t_span, rtol=1e-5, atol=1e-5, method="euler"
+        )
+        # 4. The solution is a tensor of shape (NFE, B, C, H, W). We return the last state (t=1)
+        return solution[-1]
+
+
+# %%
+# Creating the Loss and the Solver
+
+### Importing the VGG-16 model
+# vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET_V1).features
+vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features.eval()
+print(vgg)
+file_json = "vgg16_features.json"
+mapping = {}
+conv_idx = 1
+block = 1
+
+for i, layer in enumerate(vgg):
+    if isinstance(layer, torch.nn.Conv2d):
+        name = f"conv{block}_{conv_idx}"
+        mapping[name] = i
+        conv_idx += 1
+
+    elif isinstance(layer, torch.nn.ReLU):
+        name = f"relu{block}_{conv_idx - 1}"
+        mapping[name] = i
+    elif isinstance(layer, torch.nn.MaxPool2d):
+        name = f"pool{block}"
+        mapping[name] = i
+        block += 1
+        conv_idx = 1
+
+with open(file_json, "w") as f:
+    json.dump(mapping, f)
 
 # %%
 a, b, c = torch.randn(32, 64 * 3, 256, 256).chunk(3, dim=1)

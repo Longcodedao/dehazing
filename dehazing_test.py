@@ -12,9 +12,6 @@ import random
 from tqdm.notebook import tqdm
 import matplotlib.pyplot as plt
 from PIL import Image
-import time
-import sys
-import math
 from pathlib import Path
 from torch.utils.data import DataLoader, ConcatDataset
 from data import (
@@ -25,8 +22,9 @@ from data import (
     partition_dataset,
 )
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
-from einops import rearrange
-import json
+from model import UNet
+import json 
+
 
 # %%
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -134,386 +132,6 @@ print(f"Clean batch has shape: {clean.shape}")
 print(f"Hazy batch has shape: {hazy.shape}")
 
 
-# %%
-## Learning model to implement
-class SinusoidalPosEmb(nn.Module):
-    """
-    Note that the implementation is a little bit different from the
-    Transformers paper but when fed in the linear layers, they learn the weighted
-    sums accross the entire input vector
-    => All positional information are fully encoded
-    """
-
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-
-        exponential_denominator = half_dim - 1
-        log_base = math.log(10000.0)
-        c = log_base / (exponential_denominator)
-
-        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
-        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
-
-        # Apply the frequencies to the input scaler (t)
-        # t has shape (batch_size, 1) and frequencies has shape (1, half_dim)
-        arguments = x[:, None] * frequencies[None, :]
-
-        return torch.cat((arguments.sin(), arguments.cos()), dim=-1)
-
-    def forward_original(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-
-        exponential_denominator = half_dim - 1
-        log_base = math.log(10000.0)
-        c = log_base / (exponential_denominator)
-
-        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
-        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
-
-        arguments = x[:, None] * frequencies[None, :]
-
-        sin_component = arguments.sin()
-        cos_component = arguments.cos()
-
-        stacked = torch.stack((sin_component, cos_component), dim=-1)
-
-        # Reshape(batch_size, half_dim, 2) to (batch_size, half_dim * 2)
-        # Collapsing the final dimension and let those elements interleaved together
-        interleaved_eb = stacked.view(x.shape[0], -1)
-        return interleaved_eb
-
-
-batch_size = 32
-x = torch.tensor([1, 50, 100, 500])
-
-sinsoid_emb = SinusoidalPosEmb(256)
-pos_emb_1 = sinsoid_emb(x)
-pos_emb_2 = sinsoid_emb.forward_original(x)
-
-print("Shape of this is: ", sinsoid_emb(x).shape)
-print(f"First example 1 is: {pos_emb_1[0][:10]}")
-print(f"First example 2 is: {pos_emb_2[0][:10]}")
-
-
-# %%
-def convert_to_embedding(x, n_heads):
-    """
-    Args
-    x is a Tensor has shape (b, n_heads * c, h, w)
-
-    Returns:
-    out: Tensor with shape (b, n_heads, h * w, c)
-    """
-    b, _, h, w = x.shape
-    out = rearrange(x, "b (n_heads c) h w -> b n_heads (h w) c", n_heads=n_heads)
-    return out
-
-
-n_heads = 4
-dim = 64
-q = torch.randn(32, dim * n_heads, 16, 16)
-out_q = convert_to_embedding(q, n_heads)
-
-print("Shape of the out q is: ", out_q.shape)
-
-
-# %%
-class ResNetBlock(nn.Module):
-    def __init__(self, dim, dim_out, time_emb_dim=None, groups=8):
-        super().__init__()
-        self.time_mlp = (
-            nn.Sequential(nn.Linear(time_emb_dim, dim_out), nn.SiLU())
-            if time_emb_dim
-            else None
-        )
-        self.block1 = nn.Sequential(
-            nn.Conv2d(dim, dim_out, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, dim_out),
-            nn.SiLU(),
-        )
-        self.block2 = nn.Sequential(
-            nn.Conv2d(dim_out, dim_out, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, dim_out),
-            nn.SiLU(),
-        )
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
-
-    def forward(self, x, time_embed=None):
-        h = self.block1(x)
-        if self.time_mlp is not None and time_embed is not None:
-            h = h + self.time_mlp(time_embed)[:, :, None, None]
-        h = self.block2(h)
-        shortcut_h = self.res_conv(x)
-        return h + shortcut_h
-
-
-# batch_size = 32
-# t = torch.rand(batch_size)
-# sinusoid_embed = SinusoidalPosEmb(dim=256)
-# time_embed = sinusoid_embed.forward_original(t)
-#
-# x = torch.randn(batch_size, 64, 16, 16)
-# resnet_block = ResNetBlock(dim=64, dim_out=128, time_emb_dim=256)
-# output = resnet_block(x, time_embed)
-
-# print(f"Shape of the output is: {output.shape}")
-
-
-# %%
-class AttentionBlock(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32, groups=8):
-        super().__init__()
-        self.scale = dim_head ** (-0.5)
-        self.heads = heads
-        hidden_dim = heads * dim_head
-
-        # Add Multi-Scale Context
-        # We are going to diversify the context field by embedding
-        # multi convolution with different dilations
-        internal_dim = dim // 4
-        self.msc_conv1 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=1, dilation=1
-        )
-        self.msc_conv2 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=2, dilation=2
-        )
-        self.msc_conv3 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=4, dilation=4
-        )
-        self.msc_conv4 = nn.Conv2d(
-            dim, dim - (3 * internal_dim), kernel_size=3, padding=1, dilation=1
-        )
-
-        self.msc_merge = nn.Sequential(
-            nn.Conv2d(dim * 2, dim, kernel_size=1), nn.GroupNorm(groups, dim), nn.SiLU()
-        )
-
-        # Input the Attention Mechanism
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel_size=1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-
-        # Multi-Scale context step
-        x1 = self.msc_conv1(x)
-        x2 = self.msc_conv2(x)
-        x3 = self.msc_conv3(x)
-        x4 = self.msc_conv4(x)
-
-        x_merge = torch.concatenate([x1, x2, x3, x4], dim=1)
-        x_enhanced = torch.concatenate([x, x_merge], dim=1)
-        x_enhanced = self.msc_merge(x_enhanced)
-
-        q, k, v = self.to_qkv(x_enhanced).chunk(3, dim=1)
-        q = convert_to_embedding(q, self.heads)
-        k = convert_to_embedding(k, self.heads)
-        v = convert_to_embedding(v, self.heads)
-
-        q = q * self.scale
-        attention = torch.einsum("b h i d, b h j d -> b h i j", q, k)
-        attention = attention.softmax(dim=-1)
-        out = torch.einsum("b h i j, b h j d -> b h i d", attention, v)
-        out = out.permute(0, 1, 3, 2).reshape(b, -1, h, w)
-
-        return self.to_out(out) + x
-
-
-x = torch.randn(32, 64, 16, 16)
-attn_block = AttentionBlock(dim=64)
-
-result = attn_block(x)
-print("Output result of Attention Block is: ", result.shape)
-
-
-# %%
-class DownBlock(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_out,
-        attn=False,
-        time_embed_dim=256,
-        num_heads=4,
-        dim_head=32,
-        groups=8,
-    ):
-        super().__init__()
-        self.res_block1 = ResNetBlock(
-            dim_in, dim_out, time_emb_dim=time_embed_dim, groups=groups
-        )
-        self.res_block2 = ResNetBlock(
-            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
-        )
-        self.attn = (
-            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
-            if attn
-            else nn.Identity()
-        )
-
-        self.downsample = nn.Conv2d(
-            dim_out, dim_out, kernel_size=4, stride=2, padding=1
-        )
-
-    def forward(self, x, t_emb):
-        x = self.res_block1(x, t_emb)
-        x = self.attn(x)
-        x = self.res_block2(x, t_emb)
-        x = self.downsample(x)
-
-        return x
-
-
-# %%
-class UpBlock(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_skip,
-        dim_out,
-        attn=False,
-        time_embed_dim=256,
-        num_heads=4,
-        dim_head=32,
-        groups=8,
-    ):
-        super().__init__()
-        self.upsample = nn.Upsample(
-            scale_factor=2, mode="bilinear", align_corners=False
-        )
-        self.conv = nn.Conv2d(dim_in, dim_out, kernel_size=3, padding=1)
-
-        self.res_block1 = ResNetBlock(
-            dim_out + dim_skip, dim_out, time_emb_dim=time_embed_dim, groups=groups
-        )
-        self.res_block2 = ResNetBlock(
-            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
-        )
-        self.attn = (
-            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
-            if attn
-            else nn.Identity()
-        )
-
-    def forward(self, x, time_embed, skip):
-        x = self.upsample(x)
-        x = self.conv(x)
-        # Add the SKip connection from the Down layers
-        x = torch.concatenate([x, skip], dim=1)
-        # print("After Concatenating: ", x.shape)
-        x = self.res_block1(x, time_embed)
-        x = self.attn(x)
-        x = self.res_block2(x, time_embed)
-
-        return x
-
-
-# %%
-batch_size = 32
-t = torch.rand(batch_size)
-sinusoid_embed = SinusoidalPosEmb(dim=256)
-time_embed = sinusoid_embed.forward_original(t)
-
-print(f"Time embedding has shape: {time_embed.shape}")
-
-x = torch.randn(batch_size, 128, 16, 16)
-skip = torch.randn(batch_size, 128, 32, 32)
-upblock = UpBlock(dim_in=128, dim_skip=128, dim_out=64)
-output = upblock(x, time_embed, skip)
-print(f"THe size of output is: {output.shape}")
-
-
-# %%
-class UNet(nn.Module):
-    def __init__(self, dim=64, channels=3, dim_mults=(1, 2, 4, 8)):
-        super().__init__()
-        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
-        self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(dim),
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, 256),
-        )
-
-        list_dims = [dim * m for m in dim_mults]
-        list_dims = [dim] + list_dims
-        in_out = list(zip(list_dims[:-1], list_dims[1:]))
-
-        self.downs = nn.ModuleList([])
-        self.ups = nn.ModuleList([])
-        for i, (d_in, d_out) in enumerate(in_out):
-            use_attn = i >= 2
-            self.downs.append(DownBlock(d_in, d_out, attn=use_attn))
-
-        self.mid_block1 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
-        self.mid_attn = AttentionBlock(list_dims[-1])
-        self.mid_block2 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
-
-        reversed_dim = list(reversed(list_dims))
-        up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
-        dim_skip = reversed_dim[1:]
-        print("Dim skip order is: ", dim_skip)
-        for i, (d_in, d_out) in enumerate(up_in_out):
-            use_attn = i < 2
-            self.ups.append(UpBlock(d_in, dim_skip[i], d_out, attn=use_attn))
-
-        self.final_conv = nn.Sequential(
-            ResNetBlock(dim, dim), nn.Conv2d(dim, channels, kernel_size=1)
-        )
-
-    def forward(self, x, t):
-        """
-        Args:
-        x: input of the haze image
-        t: Timeline
-
-        Returns: out: Clean image
-        """
-        t_emb = self.time_mlp(t)
-        x = self.init_conv(x)
-
-        skips = []
-        for down in self.downs:
-            skips.append(x)
-            x = down(x, t_emb)
-
-        x = self.mid_block1(x, t_emb)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, t_emb)
-
-        for up in self.ups:
-            skip = skips.pop()
-            #            print("Skip shape: ", skip.shape)
-            #            print("x shape: ", x.shape)
-            #            print("Time embed shape: ", t_emb.shape)
-
-            x = up(x, t_emb, skip)
-            # print("-------------")
-
-        out = self.final_conv(x)
-        return out
-
-
-device = "cpu"
-time_stamp = torch.rand(32).to(device)
-# sinusoid = SinusoidalPosEmb(dim=64)
-# print(sinusoid(time_stamp).shape)
-unet = UNet().to(device)
-x = torch.randn(32, 3, 256, 256).to(device)
-
-output = unet(x, time_stamp)
-print("Size of the output is: ", output.shape)
-
-
-# %%
-print(unet.ups)
-
 
 # %%
 ## Implementing Flow Matching
@@ -569,40 +187,104 @@ class ODESolver:
         # 4. The solution is a tensor of shape (NFE, B, C, H, W). We return the last state (t=1)
         return solution[-1]
 
+batch_size = 32
+t_train = torch.rand(batch_size)
+x0 = torch.randn(batch_size, 64, 128, 128)
+x1 = torch.randn(batch_size, 64, 128, 128)
+
+model = UNet()
+ode_solver = ODESolver(model)
+mse_criterion = nn.MSELoss()
+
+x_t, u_t = path_sampler(x0, x1, t_train)
+pred_vf = model(x0, t_train)
+loss_flow = mse_criterion(pred_vf, u_t)
+
+print(f"Path sampler shape: {u_t.shape}")
+print(f"Loss of the flow is: {loss_flow.item():.6f}")
 
 # %%
-# Creating the Loss and the Solver
+### Coding Perceptual Loss
+class PerceptualLoss(nn.Module):
+    def __init__(self, vgg16_config_path, vgg_backbone = "VGG16",
+                 content_layers = ['relu3_3'],
+                 style_layers = ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3'],
+                 ):
+        super().__init__()
 
-### Importing the VGG-16 model
-# vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET_V1).features
-vgg = models.vgg16(weights=models.VGG16_Weights.IMAGENET1K_V1).features.eval()
-print(vgg)
-file_json = "vgg16_features.json"
-mapping = {}
-conv_idx = 1
-block = 1
+        if vgg_backbone == "VGG16":
+            backbone = models.vgg16(weights = models.VGG16_Weights.IMAGENET1K_V1).features.eval()
+        elif vgg_backbone == "VGG19":
+            backbone = models.vgg19(weights = models.VGG19_Weights.IMAGENET1K_V1).features.eval()
+        else:
+            raise ValueError("Only support backbone 'VGG16' and 'VGG19'.")
 
-for i, layer in enumerate(vgg):
-    if isinstance(layer, torch.nn.Conv2d):
-        name = f"conv{block}_{conv_idx}"
-        mapping[name] = i
-        conv_idx += 1
+        with open(vgg16_config_path, 'r') as f:
+            vgg_config = json.load(f) 
 
-    elif isinstance(layer, torch.nn.ReLU):
-        name = f"relu{block}_{conv_idx - 1}"
-        mapping[name] = i
-    elif isinstance(layer, torch.nn.MaxPool2d):
-        name = f"pool{block}"
-        mapping[name] = i
-        block += 1
-        conv_idx = 1
+        self.content_layers_idx = [vgg_config[layer] for layer in content_layers]
+        self.style_layers_idx = [vgg_config[layer] for layer in style_layers]
 
-with open(file_json, "w") as f:
-    json.dump(mapping, f)
+        max_index = max(self.content_layers_idx + self.style_layers_idx)
+        self.backbone = backbone[:max_index + 1]
 
-# %%
-a, b, c = torch.randn(32, 64 * 3, 256, 256).chunk(3, dim=1)
-print(a.shape)
-print(b.shape)
-print(c.shape)
+        for param in self.backbone.parameters():
+            param.requires_grad = False 
+
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+    
+    def extract_features(self, x):
+        x = (x - self.mean) / self.std 
+        features = {}
+
+        for name, layer in self.backbone.named_children():
+            x = layer(x)
+            index = int(name)
+
+            if index in self.content_layers_idx:
+                features[f'content_{index}'] = x 
+
+            if index in self.style_layers_idx:
+                features[f'style_{index}'] = x  
+            
+        return features
+    
+    
+    def gram_matrix(self, x):
+        _, c, h, w = x.shape
+        gram_matrix = torch.einsum('b c h w, b d h w -> b c d', x, x)
+        gram_matrix = gram_matrix / (c * h * w)
+
+        return gram_matrix
+    
+    def forward(self, predict, target, content_weight = 1.0, style_weight = 1e5):
+        predict_feat = self.extract_features(predict)
+        target_feat = self.extract_features(target)
+
+        # Calculate the content loss (MSE)
+        loss_content = 0 
+        for content_key in predict_feat:
+            if content_key.startswith('content'):
+                loss_content += F.mse_loss(predict_feat[content_key], target_feat[content_key])        
+        
+        # Calculate the style loss (MSE)
+        loss_style = 0
+        for style_key in predict_feat:
+            if style_key.startswith('style'):
+                predict_gram = self.gram_matrix(predict_feat[style_key])
+                target_gram = self.gram_matrix(target_feat[style_key])
+                loss_style += F.mse_loss(predict_gram, target_gram)
+
+        return content_weight * loss_content + style_weight * loss_style
+        
+vgg16_config_path = "vgg16_features.json"
+loss = PerceptualLoss(vgg16_config_path, vgg_backbone = "VGG16")
+
+out = torch.randn(32, 3, 128, 128)
+pred = torch.randn(32, 3, 128, 128)
+
+loss_result = loss(out, pred)
+print(f"Loss is: {loss_result}")
+
 # %%

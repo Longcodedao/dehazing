@@ -238,9 +238,9 @@ class DehazeTrainer:
                 loss_perceptual = self.loss_perceptual(
                     pred_imgs,
                     clean_imgs,
-                    # content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
-                    # style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
-                    display=True if idx % 10 == 0 else False,
+                    content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
+                    style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
+                    display=False,
                 )
                 loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
                 loss_g = (
@@ -250,13 +250,13 @@ class DehazeTrainer:
                     + self.cfg.LOSS.W_GEN * loss_gen
                 )
 
-                if idx % 10 == 0:
+                if idx % 50 == 0:
                     print("[DEBUG] Batch index: ", idx)
                     print("[DEBUG] Loss Pixels: ", loss_pixels.item())
                     print("[DEBUG] Loss Flow: ", loss_flow.item())
                     print("[DEBUG] Loss Perceptual: ", loss_perceptual.item())
                     print("[DEBUG] Loss Gen: ", loss_gen.item())
-                    print("[DEBUG] Total Loss Generative: ", loss_gen.item())
+                    print("[DEBUG] Total Loss Generative: ", loss_g.item())
                     print("-----------------------------------------")
 
             self.scaler.scale(loss_g).backward()

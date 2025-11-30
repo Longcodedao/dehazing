@@ -118,9 +118,7 @@ class PerceptualLoss(nn.Module):
                         print(f"[DEBUG] PREDICT GRAM Mean: {predict_gram.mean():.6e}")
                         print(f"[DEBUG] TARGET GRAM Mean: {target_gram.mean():.6e}")
 
-                    mse_loss_gram = F.mse_loss(
-                        predict_gram, target_gram, reduction="sum"
-                    )
+                    mse_loss_gram = F.mse_loss(predict_gram, target_gram)
                     loss_style += mse_loss_gram
             if display:
                 print(f"[DEBUG] LOSS CONTENT: {loss_content.item():.4f}")

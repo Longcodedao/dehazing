@@ -6,7 +6,7 @@ _C = CN()
 # System Settings
 # -----------------------------------------------------------------------------
 # Matches self.device = cfg.DEVICE in trainer
-_C.DEVICE = "cuda:3"
+_C.DEVICE = "cuda"
 _C.NUM_WORKERS = 4
 _C.SEED = 42
 _C.LOG_DIR = "runs"

@@ -90,10 +90,11 @@ class DehazeTrainer:
         net_D,
         train_loader,
         val_loader,
+        device,
         vgg16_config_path="vgg16_features.json",
     ):
         self.cfg = cfg
-        self.device = cfg.DEVICE
+        self.device = device
         self.net_G = net_G.to(self.device)
         self.net_D = net_D.to(self.device)
         self.ode_solver = ODESolver(self.net_G)
@@ -230,7 +231,7 @@ class DehazeTrainer:
             x1, x0 = batch
             x1 = x1.to(self.device)
             x0 = x0.to(self.device)
-            batch_size = x1.shape
+            batch_size = x1.shape[0]
 
             clean_imgs = x1
             hazy_imgs = x0
@@ -538,6 +539,8 @@ def get_loaders_for_stage(cfg, resolution, batch_size):
 cfg = get_cfg_defaults()
 yaml_path = "configs/train_cfgs/pretrain_schedule.yaml"
 cfg = load_pretrain_config(cfg, yaml_path)
+device = torch.device("cuda:3" if cfg.DEVICE == "cuda" else "cpu")
+
 
 print("Configuration: ")
 print(cfg)
@@ -546,7 +549,9 @@ print("[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
 net_G = UNet()
 net_D = Discriminator()
 # We will load the train_loader and val_loader inside the stage
-trainer = DehazeTrainer(cfg, net_G, net_D, train_loader=None, val_loader=None)
+trainer = DehazeTrainer(
+    cfg, net_G, net_D, train_loader=None, val_loader=None, device=device
+)
 
 # Iterate through the schedule and confirm each stage is a CfgNode
 for i, stage in enumerate(cfg.SCHEDULE):

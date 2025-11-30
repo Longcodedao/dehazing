@@ -429,6 +429,7 @@ cfg.freeze()
 # --- Verification ---
 print("Loaded Schedule:")
 for stage in cfg.SCHEDULE:
+    # print(stage)
     print(f"- Res: {stage.RESOLUTION} | Epochs: {stage.EPOCHS} | Batch: {stage.BATCH_SIZE}")
 
 

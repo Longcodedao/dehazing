@@ -6,19 +6,19 @@ _C = CN()
 # System Settings
 # -----------------------------------------------------------------------------
 # Matches self.device = cfg.DEVICE in trainer
-_C.DEVICE = "cuda"
+_C.DEVICE = "cuda:3"
 _C.NUM_WORKERS = 4
 _C.SEED = 42
 _C.LOG_DIR = "runs"
 _C.PIN_MEMORY = False
 _C.CHECKPOINT_DIR = "checkpoints"
-
+_C.CHECKPOINT_INTERVAL = 5
 # -----------------------------------------------------------------------------
 # Data Paths and Checkpoints
 # -----------------------------------------------------------------------------
 _C.DATA = CN()
 # Root directory where all datasets are located
-_C.DATA.DATASET_ROOT = "datasets"
+_C.DATA.DATASET_ROOT = "dataset"
 
 # Specific paths relative to DATASET_ROOT
 _C.DATA.RESIDE_INDOOR_PATH = "indoor-training-set"

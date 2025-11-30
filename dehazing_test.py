@@ -136,7 +136,7 @@ class DehazeTrainer:
                 "L_dis": MeanMetric().to(self.device),
                 "L_flow": MeanMetric().to(self.device),
                 "L_pixel": MeanMetric().to(self.device),
-                "L_perceptual": MeanMetric.to(self.device),
+                "L_perceptual": MeanMetric().to(self.device),
             }
         )
         self.eval_metrics = MetricCollection(

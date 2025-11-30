@@ -78,30 +78,52 @@ class PerceptualLoss(nn.Module):
 
     def gram_matrix(self, x):
         _, c, h, w = x.shape
+
+        # Try safer approach for that
+        scale = torch.sqrt(torch.tensor(c * h * w, dtype=x.dtype, device=x.device))
+        x = x / scale
+
         gram_matrix = torch.einsum("b c h w, b d h w -> b c d", x, x)
-        gram_matrix = gram_matrix / (c * h * w)
+        # gram_matrix = gram_matrix / (c * h * w)
 
         return gram_matrix
 
-    def forward(self, predict, target, content_weight=1.0, style_weight=1e5):
-        predict_feat = self.extract_features(predict)
-        target_feat = self.extract_features(target)
+    def forward(
+        self, predict, target, content_weight=1.0, style_weight=1e5, display=True
+    ):
+        with torch.autocast(device_type=predict.device.type, enabled=False):
+            # Cast the inputs to Float32 manually
+            predict = predict.float()
+            target = target.float()
 
-        # Calculate the content loss (MSE)
-        loss_content = 0
-        for content_key in predict_feat:
-            if content_key.startswith("content"):
-                loss_content += F.mse_loss(
-                    predict_feat[content_key], target_feat[content_key]
-                )
+            predict_feat = self.extract_features(predict)
+            target_feat = self.extract_features(target)
 
-        # Calculate the style loss (MSE)
-        loss_style = 0
-        for style_key in predict_feat:
-            if style_key.startswith("style"):
-                predict_gram = self.gram_matrix(predict_feat[style_key])
-                target_gram = self.gram_matrix(target_feat[style_key])
-                loss_style += F.mse_loss(predict_gram, target_gram)
+            # Calculate the content loss (MSE)
+            loss_content = 0
+            for content_key in predict_feat:
+                if content_key.startswith("content"):
+                    loss_content += F.mse_loss(
+                        predict_feat[content_key], target_feat[content_key]
+                    )
 
-        return content_weight * loss_content + style_weight * loss_style
+            # Calculate the style loss (MSE)
+            loss_style = 0
+            for style_key in predict_feat:
+                if style_key.startswith("style"):
+                    predict_gram = self.gram_matrix(predict_feat[style_key])
+                    target_gram = self.gram_matrix(target_feat[style_key])
 
+                    if display:
+                        print(f"[DEBUG] PREDICT GRAM Mean: {predict_gram.mean():.6e}")
+                        print(f"[DEBUG] TARGET GRAM Mean: {target_gram.mean():.6e}")
+
+                    mse_loss_gram = F.mse_loss(
+                        predict_gram, target_gram, reduction="sum"
+                    )
+                    loss_style += mse_loss_gram
+            if display:
+                print(f"[DEBUG] LOSS CONTENT: {loss_content.item():.4f}")
+                print(f"[DEBUG] LOSS STYLE  : {loss_style.item():.4f}")
+
+            return content_weight * loss_content + style_weight * loss_style

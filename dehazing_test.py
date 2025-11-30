@@ -31,6 +31,9 @@ from yacs.config import CfgNode as CN
 from config import get_cfg_defaults
 
 import os
+import torch.nn.functional as F
+import torchvision.models as models
+import json
 
 # %%
 DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
@@ -57,31 +60,10 @@ resize_size = 256
 
 
 # %%
-## Loading DenseHaze dataset
 
-transform_densehaze = get_haze_transforms(
-    dataset_name="DENSE-HAZE", resize_size=resize_size, split="val", verbose=True
-)
-
-dense_haze = DENSE_Haze_Dataset(
-    root_dir="dataset/dense-haze", transform=transform_densehaze
-)
-print("Length of Dense Haze dataset is: ", len(dense_haze))
 
 # %%
-transform_ohaze = get_haze_transforms(
-    dataset_name="OHAZE", resize_size=resize_size, split="val", verbose=True
-)
-o_haze = OHAZE_Dataset(root_dir="dataset/o-haze/O-HAZY", transform=transform_densehaze)
-print("Length of O Haze dataset is: ", len(o_haze))
-
-# %%
-## Loader dataset
-
-dense_haze_loader = DataLoader(dense_haze, batch_size=16, shuffle=False, num_workers=4)
-o_haze_loader = DataLoader(o_haze, batch_size=16, shuffle=False, num_workers=4)
-
-
+## Trainer
 class DehazeTrainer:
     def __init__(
         self,
@@ -108,7 +90,7 @@ class DehazeTrainer:
         )
 
         self.opt_D = optim.Adam(
-            self.net_G.parameters(),
+            self.net_D.parameters(),
             lr=cfg.OPTIM.LR,
             betas=(cfg.OPTIM.BETA1, cfg.OPTIM.BETA2),
         )
@@ -126,7 +108,7 @@ class DehazeTrainer:
         self.loss_adversarial = AdversarialLoss()
         self.loss_flow = nn.MSELoss()
         self.loss_pixels = nn.MSELoss()
-        self.loss_perceptual = PerceptualLoss(vgg16_config_path)
+        self.loss_perceptual = PerceptualLoss(vgg16_config_path).to(self.device)
 
         self.scaler = torch.amp.GradScaler(self.device)
 
@@ -256,8 +238,9 @@ class DehazeTrainer:
                 loss_perceptual = self.loss_perceptual(
                     pred_imgs,
                     clean_imgs,
-                    content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
-                    style_wieght=self.cfg.LOSS.PERCEPTUAL.STYLE,
+                    # content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
+                    # style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
+                    display=True if idx % 10 == 0 else False,
                 )
                 loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
                 loss_g = (
@@ -266,6 +249,15 @@ class DehazeTrainer:
                     + self.cfg.LOSS.W_PERC * loss_perceptual
                     + self.cfg.LOSS.W_GEN * loss_gen
                 )
+
+                if idx % 10 == 0:
+                    print("[DEBUG] Batch index: ", idx)
+                    print("[DEBUG] Loss Pixels: ", loss_pixels.item())
+                    print("[DEBUG] Loss Flow: ", loss_flow.item())
+                    print("[DEBUG] Loss Perceptual: ", loss_perceptual.item())
+                    print("[DEBUG] Loss Gen: ", loss_gen.item())
+                    print("[DEBUG] Total Loss Generative: ", loss_gen.item())
+                    print("-----------------------------------------")
 
             self.scaler.scale(loss_g).backward()
             self.scaler.step(self.opt_G)
@@ -350,7 +342,7 @@ class DehazeTrainer:
             hazy_imgs = x0
 
             with torch.autocast(device_type=self.device.type):
-                pred_imgs = self.ode_solver(hazy_imgs)
+                pred_imgs = self.ode_solver.sample(hazy_imgs)
 
             pred_original = restandardize_tensor(pred_imgs)
             target_original = restandardize_tensor(clean_imgs)
@@ -365,10 +357,10 @@ class DehazeTrainer:
         # Calcualt
         result = self.eval_metrics.compute()
 
-        self.writer.add_scaler(
+        self.writer.add_scalar(
             f"Metrics/Stage_{self.stage_index}/PSNR", result["psnr"].item(), epoch
         )
-        self.writer.add_scaler(
+        self.writer.add_scalar(
             f"Metrics/Stage_{self.stage_index}/SSIM", result["ssim"].item(), epoch
         )
         return result

@@ -1,0 +1,2 @@
+from .perceptual_loss import PerceptualLoss
+from .adversarial_loss import AdversarialLoss

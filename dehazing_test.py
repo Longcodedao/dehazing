@@ -31,6 +31,7 @@ from model.adversarial import Discriminator
 
 from losses import PerceptualLoss, AdversarialLoss
 
+from yacs.config import CfgNode as CN
 from config import get_cfg_defaults
 
 import os
@@ -413,25 +414,38 @@ class DehazeTrainer:
         # Calcualt
         result = self.eval_metrics.compute()
         return result
-    
+
+
 # %%
 ## Training Schedule
+## Getting the cfg file
+
 cfg = get_cfg_defaults()
 
 # 2. Merge the specific schedule file
 # This replaces the empty [] list in config.py with the list from your YAML
 schedule_path = "configs/train_cfgs/pretrain_schedule.yaml"
 cfg.merge_from_file(schedule_path)
-
-# 3. Freeze the config to prevent accidental changes
 cfg.freeze()
 
-# --- Verification ---
-print("Loaded Schedule:")
-for stage in cfg.SCHEDULE:
-    # print(stage)
-    print(f"- Res: {stage.RESOLUTION} | Epochs: {stage.EPOCHS} | Batch: {stage.BATCH_SIZE}")
+print(cfg)
+# 3. Verify the structure
+print("Config object type:", type(cfg))
+print(f"Schedule list has {len(cfg.SCHEDULE)} stages.")
 
+# Iterate through the schedule and confirm each stage is a CfgNode
+for i, stage in enumerate(cfg.SCHEDULE):
+    stage = CN(stage)
+    print(f"\n--- Stage {i} ---")
+    print(f"Type of stage object: {type(stage)}")
+    print(f"Resolution: {stage.RESOLUTION}")
+    print(f"Epochs: {stage.EPOCHS}")
+    print(f"Batch Size: {stage.BATCH_SIZE}")
+    print(f"Patience: {stage.PATIENCE}")
+    
+    # You can access elements using dot notation because they are CfgNodes:
+    if stage.RESOLUTION == 256:
+        print(f"  Found 256 resolution stage! Batch size is {stage.BATCH_SIZE}")
 
 
 # %%

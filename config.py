@@ -58,13 +58,6 @@ _C.LOSS.PERCEPTUAL.VGG_BACKBONE = "VGG16"
 # It will be completely overwritten by the list defined in 
 # 'configs/train_cfgs/pretrain_schedule.yaml' when you call cfg.merge_from_file().
 _C.SCHEDULE = []
-_C.SCHEDULE_SCHEMA = CN()
-_C.SCHEDULE_SCHEMA.RESOLUTION = 0    # int
-_C.SCHEDULE_SCHEMA.EPOCHS = 0        # int
-_C.SCHEDULE_SCHEMA.BATCH_SIZE = 0    # int
-_C.SCHEDULE_SCHEMA.PATIENCE = 0      # int
-_C.SCHEDULE.append(_C.SCHEDULE_SCHEMA)
-del _C.SCHEDULE_SCHEMA
 
 
 # -----------------------------------------------------------------------------

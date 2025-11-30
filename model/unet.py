@@ -1,7 +1,8 @@
-import torch 
+import torch
 import torch.nn as nn
-import math 
+import math
 from einops import rearrange
+
 
 def convert_to_embedding(x, n_heads):
     """
@@ -14,7 +15,6 @@ def convert_to_embedding(x, n_heads):
     b, _, h, w = x.shape
     out = rearrange(x, "b (n_heads c) h w -> b n_heads (h w) c", n_heads=n_heads)
     return out
-
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -95,10 +95,10 @@ class ResNetBlock(nn.Module):
         if self.time_mlp is not None and time_embed is not None:
             h = h + self.time_mlp(time_embed)[:, :, None, None]
         h = self.block2(h)
-        shortcut_h = self.res_conv(x) 
-        
+        shortcut_h = self.res_conv(x)
+
         return h + shortcut_h
-    
+
 
 class AttentionBlock(nn.Module):
     def __init__(self, dim, heads=4, dim_head=32, groups=8):
@@ -156,7 +156,7 @@ class AttentionBlock(nn.Module):
         out = out.permute(0, 1, 3, 2).reshape(b, -1, h, w)
 
         return self.to_out(out) + x
-    
+
 
 class DownBlock(nn.Module):
     def __init__(
@@ -266,7 +266,7 @@ class UNet(nn.Module):
         reversed_dim = list(reversed(list_dims))
         up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
         dim_skip = reversed_dim[1:]
-        print("Dim skip order is: ", dim_skip)
+
         for i, (d_in, d_out) in enumerate(up_in_out):
             use_attn = i < 2
             self.ups.append(UpBlock(d_in, dim_skip[i], d_out, attn=use_attn))
@@ -306,4 +306,4 @@ class UNet(nn.Module):
 
         out = self.final_conv(x)
         return out
-    
+

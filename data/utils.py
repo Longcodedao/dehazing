@@ -12,22 +12,23 @@ def print_transform_summary(
     """Prints a structured summary of the different transformation components."""
 
     print(f"## 📝 Dehazing Transformations Summary: {name}")
-    print("---")
+    print("------------------------------------------------")
 
     # 1. Geometric Transforms (Applied Synchronously to Clear and Hazy)
-    print("### 1. Geometric (Synchronous) Transforms:")
+    print("1. Geometric (Synchronous) Transforms:")
     print("Applies identically to both CLEAR and HAZY images for pixel alignment.")
     print(geometric_sync)
 
     # 2. Hazy-Only Transforms (Applied Asynchronously to Hazy)
-    print("\n### 2. Appearance (Hazy-Only) Transforms:")
+    print("\n2. Appearance (Hazy-Only) Transforms:")
     print("Applied only to the HAZY image to simulate real-world haze variations.")
     print(haze_only)
 
     # 3. Common Transforms (Applied to both before model input)
-    print("\n### 3. Common (Tensor Conversion & Normalization) Transforms:")
+    print("\n3. Common (Tensor Conversion & Normalization) Transforms:")
     print("Applied to both images before feeding to the model.")
     print(common)
+    print("\n")
 
 
 def restandardize_tensor(
@@ -165,7 +166,7 @@ def get_haze_transforms(
         # --- Print Summary (Conditional) ---
         if verbose:
             print_transform_summary(
-                name=f"Training Split (Size: {resize_size}x{resize_size})",
+                name=f"Dataset: {dataset_name}\tTraining Split (Size: {resize_size}x{resize_size})",
                 geometric_sync=geometric_sync_transforms,
                 haze_only=haze_only_transforms,
                 common=common_transforms,
@@ -182,7 +183,7 @@ def get_haze_transforms(
 
         if verbose:
             print_transform_summary(
-                name=f"Validation/Test Split (Size: {resize_size}x{resize_size})",
+                name=f"Dataset: {dataset_name}\tValidation/Test Split (Size: {resize_size}x{resize_size})",
                 geometric_sync=v2.Identity(),  # No random geometric transforms
                 haze_only=v2.Identity(),  # No color jitter/grayscale
                 common=common_transforms,

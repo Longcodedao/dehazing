@@ -1,5 +1,6 @@
-import torch 
+import torch
 from torchdiffeq import odeint
+
 
 def path_sampler(x0, x1, t):
     """
@@ -32,7 +33,7 @@ class ODESolver:
         # 2. Call the UNet (self.model)
         # The UNet predicts the velocity field (v_theta) given the time and the
         # image state
-        v_theta = self.model(t, x)
+        v_theta = self.model(x, t)
 
         return v_theta
 
@@ -52,3 +53,4 @@ class ODESolver:
         )
         # 4. The solution is a tensor of shape (NFE, B, C, H, W). We return the last state (t=1)
         return solution[-1]
+

@@ -22,7 +22,7 @@ from data import (
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
 
 from model.unet import UNet
-from model.flow_matching import path_sampler
+from model.flow_matching import path_sampler, ODESolver
 from model.adversarial import Discriminator
 
 from losses import PerceptualLoss, AdversarialLoss
@@ -58,44 +58,6 @@ def set_seed(seed):
 
 set_seed(42)
 resize_size = 256
-
-
-# %%
-## Debugging the ODESolver
-class ODESolver:
-    def __init__(self, model, nfe=20):
-        self.model = model
-        self.nfe = nfe
-
-    def ode_func(self, t, x):
-        # 1. Ensure the time 't' is a vector of size (B,)
-        # The ODE solver passes 't' as a scaler (if batching is not done internally)
-        # We must expand/broadcast it to match the batch size 'x'
-        t = t.expand(x.size(0))
-
-        # 2. Call the UNet (self.model)
-        # The UNet predicts the velocity field (v_theta) given the time and the
-        # image state
-        v_theta = self.model(x, t)
-
-        return v_theta
-
-    @torch.no_grad()
-    def sample(self, x_init):
-        # 1. Define the time span for integration (from 0 to 1, in nfe steps)
-        t_span = torch.linspace(0, 1, self.nfe, device=x_init.device)
-
-        # 2. Define the ODE function for the solver to use
-        # The solver requires a function (t, x) -> dx/dt
-        # We can use the method we just defined:
-        ode_func = self.ode_func
-
-        # 3. Perform the ODE integration
-        solution = odeint(
-            ode_func, x_init, t_span, rtol=1e-5, atol=1e-5, method="euler"
-        )
-        # 4. The solution is a tensor of shape (NFE, B, C, H, W). We return the last state (t=1)
-        return solution[-1]
 
 
 # %%
@@ -158,13 +120,11 @@ class DehazeTrainer:
                 "L_perceptual": MeanMetric().to(self.device),
             }
         )
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+
         self.eval_metrics = MetricCollection(
-            {
-                "psnr": PeakSignalNoiseRatio(data_range=1.0).to(self.device),
-                "ssim": StructuralSimilarityIndexMeasure(data_range=1.0).to(
-                    self.device
-                ),
-            }
+            {"psnr": MeanMetric().to(self.device), "ssim": MeanMetric().to(self.device)}
         )
 
         self.epoch = 1
@@ -286,14 +246,14 @@ class DehazeTrainer:
                     + self.cfg.LOSS.W_GEN * loss_gen
                 )
 
-                if idx % 50 == 0:
-                    print("[DEBUG] Batch index: ", idx)
-                    print("[DEBUG] Loss Pixels: ", loss_pixels.item())
-                    print("[DEBUG] Loss Flow: ", loss_flow.item())
-                    print("[DEBUG] Loss Perceptual: ", loss_perceptual.item())
-                    print("[DEBUG] Loss Gen: ", loss_gen.item())
-                    print("[DEBUG] Total Loss Generative: ", loss_g.item())
-                    print("-----------------------------------------")
+            #                if idx % 50 == 0:
+            #                    print("[DEBUG] Batch index: ", idx)
+            #                    print("[DEBUG] Loss Pixels: ", loss_pixels.item())
+            #                    print("[DEBUG] Loss Flow: ", loss_flow.item())
+            #                    print("[DEBUG] Loss Perceptual: ", loss_perceptual.item())
+            #                    print("[DEBUG] Loss Gen: ", loss_gen.item())
+            #                    print("[DEBUG] Total Loss Generative: ", loss_g.item())
+            #                    print("-----------------------------------------")
 
             self.scaler.scale(loss_g).backward()
             self.scaler.step(self.opt_G)
@@ -374,9 +334,6 @@ class DehazeTrainer:
             x1 = x1.to(self.device)
             x0 = x0.to(self.device)
 
-            print(f"[DEBUG] Shape of Clean Imgs: {x1.shape}")
-            print(f"[DEBUG] Shape of Hazy Imgs: {x0.shape}")
-
             clean_imgs = x1
             hazy_imgs = x0
 
@@ -386,11 +343,20 @@ class DehazeTrainer:
             pred_original = restandardize_tensor(pred_imgs)
             target_original = restandardize_tensor(clean_imgs)
 
-            self.eval_metrics["psnr"].compute(
-                pred_original.detach(), target_original.detach()
+            self.eval_metrics["psnr"].update(
+                self.psnr(pred_original.detach(), target_original.detach())
             )
-            self.eval_metrics["ssim"].compute(
-                pred_original.detach(), target_original.detach()
+            self.eval_metrics["ssim"].update(
+                self.ssim(pred_original.detach(), target_original.detach())
+            )
+
+            psnr_value = self.eval_metrics["psnr"].compute()
+            ssim_value = self.eval_metrics["ssim"].compute()
+            pbar.set_postfix(
+                {
+                    "PSNR": f"{psnr_value:.4f}",
+                    "SSIM": f"{ssim_value:.4f}",
+                }
             )
 
         # Calcualt
@@ -502,7 +468,7 @@ def load_pretrain_config(cfg, yaml_path):
     return cfg
 
 
-def get_loaders_for_stage(cfg, resolution, batch_size, display=True):
+def get_loaders_for_stage(cfg, resolution, batch_size):
     data_cfg = cfg.DATA
 
     train_transform_reside = get_haze_transforms(
@@ -563,11 +529,6 @@ def get_loaders_for_stage(cfg, resolution, batch_size, display=True):
         num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,
     )
-    if display:
-        val_batch = next(iter(val_loader))
-        x1, x0 = val_batch
-        print(f"[DEBUG]: Shape of Clean Imgs is: {x1.shape}")
-        print(f"[DEBUG]: Shape of Hazy Imgs is: {x0.shape}")
 
     return train_loader, val_loader
 
@@ -581,7 +542,7 @@ device = torch.device("cuda:3" if cfg.DEVICE == "cuda" else "cpu")
 print("Configuration: ")
 print(cfg)
 
-print("[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
+print(f"\n\n[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
 net_G = UNet()
 net_D = Discriminator()
 # We will load the train_loader and val_loader inside the stage
@@ -604,9 +565,7 @@ for i, stage in enumerate(cfg.SCHEDULE):
     )
     print("==============================================")
 
-    train_loader, val_loader = get_loaders_for_stage(
-        cfg, resolution, batch_size, display=True
-    )
+    train_loader, val_loader = get_loaders_for_stage(cfg, resolution, batch_size)
     trainer.train_loader = train_loader
     trainer.val_loader = val_loader
 

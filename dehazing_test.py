@@ -22,7 +22,7 @@ from data import (
 from data import RESIDE_Indoor, Haze4k_Dataset, OHAZE_Dataset, DENSE_Haze_Dataset
 
 from model.unet import UNet
-from model.flow_matching import path_sampler, ODESolver
+from model.flow_matching import path_sampler
 from model.adversarial import Discriminator
 
 from losses import PerceptualLoss, AdversarialLoss
@@ -34,6 +34,7 @@ import os
 import torch.nn.functional as F
 import torchvision.models as models
 import json
+from torchdiffeq import odeint
 
 # %%
 DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
@@ -60,6 +61,41 @@ resize_size = 256
 
 
 # %%
+## Debugging the ODESolver
+class ODESolver:
+    def __init__(self, model, nfe=20):
+        self.model = model
+        self.nfe = nfe
+
+    def ode_func(self, t, x):
+        # 1. Ensure the time 't' is a vector of size (B,)
+        # The ODE solver passes 't' as a scaler (if batching is not done internally)
+        # We must expand/broadcast it to match the batch size 'x'
+        t = t.expand(x.size(0))
+
+        # 2. Call the UNet (self.model)
+        # The UNet predicts the velocity field (v_theta) given the time and the
+        # image state
+        v_theta = self.model(x, t)
+
+        return v_theta
+
+    @torch.no_grad()
+    def sample(self, x_init):
+        # 1. Define the time span for integration (from 0 to 1, in nfe steps)
+        t_span = torch.linspace(0, 1, self.nfe, device=x_init.device)
+
+        # 2. Define the ODE function for the solver to use
+        # The solver requires a function (t, x) -> dx/dt
+        # We can use the method we just defined:
+        ode_func = self.ode_func
+
+        # 3. Perform the ODE integration
+        solution = odeint(
+            ode_func, x_init, t_span, rtol=1e-5, atol=1e-5, method="euler"
+        )
+        # 4. The solution is a tensor of shape (NFE, B, C, H, W). We return the last state (t=1)
+        return solution[-1]
 
 
 # %%
@@ -338,6 +374,9 @@ class DehazeTrainer:
             x1 = x1.to(self.device)
             x0 = x0.to(self.device)
 
+            print(f"[DEBUG] Shape of Clean Imgs: {x1.shape}")
+            print(f"[DEBUG] Shape of Hazy Imgs: {x0.shape}")
+
             clean_imgs = x1
             hazy_imgs = x0
 
@@ -396,15 +435,15 @@ class DehazeTrainer:
 
         for epoch in range(self.epoch, total_epochs + 1):
             # --- Training ---
-            train_results = self.train_epoch(epoch)
+            # train_results = self.train_epoch(epoch)
 
             # --- Validation ---
             val_results = self.eval_epoch(epoch)
 
             print(f"Stage {stage_index} Epoch {epoch} Results:")
-            print(
-                f"  Train: L_G={train_results['L_gen']:.4f}, L_D={train_results['L_dis']:.4f}"
-            )
+            # print(
+            #    f"  Train: L_G={train_results['L_gen']:.4f}, L_D={train_results['L_dis']:.4f}"
+            # )
             print(
                 f"  Eval: PSNR={val_results['psnr']:.4f}, SSIM={val_results['ssim']:.4f}"
             )
@@ -463,7 +502,7 @@ def load_pretrain_config(cfg, yaml_path):
     return cfg
 
 
-def get_loaders_for_stage(cfg, resolution, batch_size):
+def get_loaders_for_stage(cfg, resolution, batch_size, display=True):
     data_cfg = cfg.DATA
 
     train_transform_reside = get_haze_transforms(
@@ -492,10 +531,10 @@ def get_loaders_for_stage(cfg, resolution, batch_size):
 
     # Loading the Haze4k Dataset
     train_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resize_size, split="train", verbose=True
+        dataset_name="HAZE4K", resize_size=resolution, split="train", verbose=True
     )
     val_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resize_size, split="val", verbose=True
+        dataset_name="HAZE4K", resize_size=resolution, split="val", verbose=True
     )
     haze_4k_train = Haze4k_Dataset(
         root_dir=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
@@ -524,6 +563,11 @@ def get_loaders_for_stage(cfg, resolution, batch_size):
         num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,
     )
+    if display:
+        val_batch = next(iter(val_loader))
+        x1, x0 = val_batch
+        print(f"[DEBUG]: Shape of Clean Imgs is: {x1.shape}")
+        print(f"[DEBUG]: Shape of Hazy Imgs is: {x0.shape}")
 
     return train_loader, val_loader
 
@@ -560,7 +604,9 @@ for i, stage in enumerate(cfg.SCHEDULE):
     )
     print("==============================================")
 
-    train_loader, val_loader = get_loaders_for_stage(cfg, resolution, batch_size)
+    train_loader, val_loader = get_loaders_for_stage(
+        cfg, resolution, batch_size, display=True
+    )
     trainer.train_loader = train_loader
     trainer.val_loader = val_loader
 

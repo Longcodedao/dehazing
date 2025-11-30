@@ -97,7 +97,7 @@ def get_haze_transforms(
     # --- Component Definitions ---
     common_transforms = v2.Compose(
         [
-            v2.Resize(resize_size, antialias=True),
+            v2.Resize((resize_size, resize_size), antialias=True),
             v2.ToImage(),
             v2.ToDtype(torch.float32, scale=True),
             v2.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),

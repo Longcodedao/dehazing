@@ -29,7 +29,8 @@ class ODESolver:
         # The ODE solver passes 't' as a scaler (if batching is not done internally)
         # We must expand/broadcast it to match the batch size 'x'
         t = t.expand(x.size(0))
-
+        # print("t shape is: ", t.shape)
+        # print("x shape is: ", x.shape)
         # 2. Call the UNet (self.model)
         # The UNet predicts the velocity field (v_theta) given the time and the
         # image state

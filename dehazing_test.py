@@ -1,17 +1,13 @@
 # %%
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torchmetrics import MeanMetric, MetricCollection
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-import random
-from tqdm.notebook import tqdm
-import matplotlib.pyplot as plt
-from PIL import Image
-from pathlib import Path
-from torch.utils.data import DataLoader, ConcatDataset
+
+# from tqdm.notebook import tqdm
+from tqdm import tqdm
 from data import (
     get_haze_transforms,
     restandardize_tensor,
@@ -31,33 +27,134 @@ from yacs.config import CfgNode as CN
 from config import get_cfg_defaults
 
 import os
-import torch.nn.functional as F
-import torchvision.models as models
-import json
-from torchdiffeq import odeint
-
-# %%
-DEVICE = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
-LEARNING_RATE = 5e-4
-WEIGHT_DECAY = 1e-4
-B1, B2 = 0.5, 0.999
-W_FLOW, W_MSE, W_PERC, W_ADV = 1.0, 1.0, 0.1, 0.01
-TIME_LIMIT_HOURS = 11.5
-BATCH_SIZE = 256
+import argparse
 
 
 # %%
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+def create_args():
+    parser = argparse.ArgumentParser(description="Dehaze Flow Matching Trainer")
 
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    parser.add_argument(
+        "--pretrain-config",
+        default="configs/train_cfgs/pretrain_schedule.yaml",
+        metavar="FILE",
+        help="path to config file",
+        type=str,
+    )
+
+    # --- Specific System Overrides ---
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=None,
+        help="Specify number of workers for loading the batch",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="Specify the seed for initialization"
+    )
+    parser.add_argument(
+        "--log_dir", type=str, default=None, help="Path to save the log (Tensorboard)"
+    )
+    # Using int (0 or 1) is safer than store_true for overriding config files
+    parser.add_argument(
+        "--pin_memory",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Overwrites cfg.PIN_MEMORY (0=False, 1=True)",
+    )
+    parser.add_argument(
+        "--checkpoint_dir", type=str, default=None, help="Save the checkpoint directory"
+    )
+
+    # --- specific Data Overrides ---
+    parser.add_argument(
+        "--dataset_root",
+        type=str,
+        default=None,
+        help="Overwrites cfg.DATA.DATASET_ROOT",
+    )
+
+    # --- Resume ---
+    parser.add_argument(
+        "--resume",
+        default="",
+        help="path to checkpoint to resume from",
+        type=str,
+    )
+
+    # --- General Overrides (yacs list) ---
+    parser.add_argument(
+        "opts",
+        help="Modify config options using the command-line (e.g., OPTIM.LR 1e-4)",
+        default=None,
+        nargs=argparse.REMAINDER,
+    )
+
+    args = parser.parse_args()
+    return args
 
 
-set_seed(42)
-resize_size = 256
+def setup_config(args):
+    """
+    Priority Order (Low to High):
+    1. Default values in code (_C)
+    2. YAML config file
+    3. Specific argparse arguments (--num_workers, etc.)
+    4. General argparse options (opts)
+    """
+    # 1. Get Defaults
+    cfg = get_cfg_defaults()
+
+    # 2. Merge YAML file
+    if args.config_file:
+        try:
+            cfg.merge_from_file(args.config_file)
+            print(f"[+] Loaded config from {args.config_file}")
+        except Exception as e:
+            print(f"[-] Error merging config file {args.config_file}: {e}")
+
+    # 3. Merge Specific CLI arguments
+    # We only update if the argument is NOT None (i.e., user actually typed it)
+    if args.num_workers is not None:
+        cfg.NUM_WORKERS = args.num_workers
+
+    if args.seed is not None:
+        cfg.SEED = args.seed
+
+    if args.log_dir is not None:
+        cfg.LOG_DIR = args.log_dir
+
+    if args.pin_memory is not None:
+        cfg.PIN_MEMORY = bool(args.pin_memory)
+
+    if args.checkpoint_dir is not None:
+        cfg.CHECKPOINT_DIR = args.checkpoint_dir
+
+    if args.dataset_root is not None:
+        # Note: dataset_root is nested under DATA in your config definition
+        cfg.DATA.DATASET_ROOT = args.dataset_root
+
+    if args.resume:
+        cfg.TRAIN.RESUME_PATH = args.resume
+
+    # 4. Merge General opts (Highest Priority)
+    if args.opts:
+        cfg.merge_from_list(args.opts)
+        print(f"[+] Merged command line options: {args.opts}")
+
+    # 5. Process Schedule (Convert dicts to CfgNode if necessary)
+    new_schedule = []
+    for item in cfg.SCHEDULE:
+        if isinstance(item, dict):
+            new_schedule.append(CN(item))
+        else:
+            new_schedule.append(item)
+    cfg.SCHEDULE = new_schedule
+
+    # 6. Freeze
+    cfg.freeze()
+    return cfg
 
 
 # %%
@@ -448,165 +545,88 @@ class DehazeTrainer:
 # %%
 ## Training Schedule
 ## Getting the cfg file
-def load_pretrain_config(cfg, yaml_path):
-    # 2. Merge the specific schedule file
-    # This replaces the empty [] list in config.py with the list from your YAML
-    try:
-        cfg.merge_from_file(yaml_path)
-    except Exception as e:
-        print(f"Error merging config file {yaml_path}: {e}")
-
-    new_schedule = []
-    for item in cfg.SCHEDULE:
-        if isinstance(item, dict):
-            new_schedule.append(CN(item))
-        else:
-            new_schedule.append(item)
-    cfg.SCHEDULE = new_schedule
-
-    cfg.freeze()
-    return cfg
 
 
-def get_loaders_for_stage(cfg, resolution, batch_size):
-    data_cfg = cfg.DATA
+if __name__ == "__main__":
+    # 1. Parse Args
+    args = create_args()
 
-    train_transform_reside = get_haze_transforms(
-        dataset_name="RESIDE",
-        resize_size=resolution,
-        split="train",
-        verbose=True,
+    # 2. Setup Configuration
+    cfg = setup_config(args)
+
+    # 3. Setup SEED
+    set_seed(cfg.SEED)
+
+    device = torch.device("cuda:3" if cfg.DEVICE == "cuda" else "cpu")
+
+    print("Configuration: ")
+    print(cfg)
+
+    print(f"\n\n[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
+    net_G = UNet()
+    net_D = Discriminator()
+    # We will load the train_loader and val_loader inside the stage
+    trainer = DehazeTrainer(
+        cfg, net_G, net_D, train_loader=None, val_loader=None, device=device
     )
 
-    val_transform_reside = get_haze_transforms(
-        dataset_name="RESIDE",
-        resize_size=resolution,
-        split="val",
-        verbose=True,
-    )
-    reside_dataset = RESIDE_Indoor(
-        dataset_path=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        transform=None,
-    )
-    train_reside_dataset, val_reside_dataset = partition_dataset(
-        reside_dataset,
-        train_transform_reside,
-        val_transform_reside,
-        train_ratio=data_cfg.TRAIN_RATIO,
-    )
+    # Iterate through the schedule and confirm each stage is a CfgNode
+    for i, stage in enumerate(cfg.SCHEDULE):
+        stage_index = i + 1
 
-    # Loading the Haze4k Dataset
-    train_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resolution, split="train", verbose=True
-    )
-    val_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resolution, split="val", verbose=True
-    )
-    haze_4k_train = Haze4k_Dataset(
-        root_dir=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        split="train",
-        transform=train_transform_haze4k,
-    )
-    haze_4k_val = Haze4k_Dataset(
-        root_dir=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        split="val",
-        transform=val_transform_haze4k,
-    )
-    train_dataset = ConcatDataset([train_reside_dataset, haze_4k_train])
-    val_dataset = ConcatDataset([val_reside_dataset, haze_4k_val])
+        resolution = stage.RESOLUTION
+        batch_size = stage.BATCH_SIZE
+        epochs = stage.EPOCHS
+        patience = stage.PATIENCE
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=cfg.NUM_WORKERS,
-        pin_memory=cfg.PIN_MEMORY,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=stage.BATCH_SIZE,
-        shuffle=False,
-        num_workers=cfg.NUM_WORKERS,
-        pin_memory=cfg.PIN_MEMORY,
-    )
+        print("\n==============================================")
+        print(
+            f"STAGE {stage_index}: Resolution={resolution}x{resolution}, Batch={batch_size}"
+        )
+        print("==============================================")
 
-    return train_loader, val_loader
+        train_loader, val_loader = get_loaders_for_stage(cfg, resolution, batch_size)
+        trainer.train_loader = train_loader
+        trainer.val_loader = val_loader
 
+        # 2. Run the training for this stage
+        trainer.train_stage(
+            stage_index,
+            epochs,
+            patience,
+            checkpoint_dir=cfg.CHECKPOINT_DIR,
+            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
+        )
 
-cfg = get_cfg_defaults()
-yaml_path = "configs/train_cfgs/pretrain_schedule.yaml"
-cfg = load_pretrain_config(cfg, yaml_path)
-device = torch.device("cuda:3" if cfg.DEVICE == "cuda" else "cpu")
-
-
-print("Configuration: ")
-print(cfg)
-
-print(f"\n\n[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
-net_G = UNet()
-net_D = Discriminator()
-# We will load the train_loader and val_loader inside the stage
-trainer = DehazeTrainer(
-    cfg, net_G, net_D, train_loader=None, val_loader=None, device=device
-)
-
-# Iterate through the schedule and confirm each stage is a CfgNode
-for i, stage in enumerate(cfg.SCHEDULE):
-    stage_index = i + 1
-
-    resolution = stage.RESOLUTION
-    batch_size = stage.BATCH_SIZE
-    epochs = stage.EPOCHS
-    patience = stage.PATIENCE
-
-    print("\n==============================================")
-    print(
-        f"STAGE {stage_index}: Resolution={resolution}x{resolution}, Batch={batch_size}"
-    )
-    print("==============================================")
-
-    train_loader, val_loader = get_loaders_for_stage(cfg, resolution, batch_size)
-    trainer.train_loader = train_loader
-    trainer.val_loader = val_loader
-
-    # 2. Run the training for this stage
-    trainer.train_stage(
-        stage_index,
-        epochs,
-        patience,
-        checkpoint_dir=cfg.CHECKPOINT_DIR,
-        checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
-    )
-
-print("\n[+] Progressive Training Complete.")
-trainer.writer.close()
+    print("\n[+] Progressive Training Complete.")
+    trainer.writer.close()
 
 # %%
 ## Loading DenseHaze dataset
 
-transform_densehaze = get_haze_transforms(
-    dataset_name="DENSE-HAZE", resize_size=resize_size, split="val", verbose=True
-)
-
-dense_haze = DENSE_Haze_Dataset(
-    root_dir="dataset/dense-haze", transform=transform_densehaze
-)
-print("Length of Dense Haze dataset is: ", len(dense_haze))
-
-# %%
-transform_ohaze = get_haze_transforms(
-    dataset_name="OHAZE", resize_size=resize_size, split="val", verbose=True
-)
-o_haze = OHAZE_Dataset(root_dir="dataset/o-haze/O-HAZY", transform=transform_densehaze)
-print("Length of O Haze dataset is: ", len(o_haze))
-
-# %%
-## Loader dataset
-train_loader = DataLoader(
-    train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True
-)
-val_loader = DataLoader(
-    val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True
-)
-dense_haze_loader = DataLoader(dense_haze, batch_size=16, shuffle=False, num_workers=4)
-o_haze_loader = DataLoader(o_haze, batch_size=16, shuffle=False, num_workers=4)
+# transform_densehaze = get_haze_transforms(
+#    dataset_name="DENSE-HAZE", resize_size=resize_size, split="val", verbose=True
+# )
+#
+# dense_haze = DENSE_Haze_Dataset(
+#    root_dir="dataset/dense-haze", transform=transform_densehaze
+# )
+# print("Length of Dense Haze dataset is: ", len(dense_haze))
+#
+## %%
+# transform_ohaze = get_haze_transforms(
+#    dataset_name="OHAZE", resize_size=resize_size, split="val", verbose=True
+# )
+# o_haze = OHAZE_Dataset(root_dir="dataset/o-haze/O-HAZY", transform=transform_densehaze)
+# print("Length of O Haze dataset is: ", len(o_haze))
+#
+## %%
+### Loader dataset
+# train_loader = DataLoader(
+#    train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True
+# )
+# val_loader = DataLoader(
+#    val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True
+# )
+# dense_haze_loader = DataLoader(dense_haze, batch_size=16, shuffle=False, num_workers=4)
+# o_haze_loader = DataLoader(o_haze, batch_size=16, shuffle=False, num_workers=4)

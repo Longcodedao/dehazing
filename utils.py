@@ -1,7 +1,8 @@
 import random
-import np
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data.distributed import DistributedSampler
 from data.utils import get_haze_transforms, partition_dataset
 from data import RESIDE_Indoor, Haze4k_Dataset
 
@@ -64,10 +65,14 @@ def get_loaders_for_stage(cfg, resolution, batch_size):
     train_dataset = ConcatDataset([train_reside_dataset, haze_4k_train])
     val_dataset = ConcatDataset([val_reside_dataset, haze_4k_val])
 
+    train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, shuffle=True)
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
+        sampler=train_sampler,
         num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,
     )
@@ -75,8 +80,9 @@ def get_loaders_for_stage(cfg, resolution, batch_size):
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
+        sampler=val_sampler,
         num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,
     )
 
-    return train_loader, val_loader
+    return train_loader, val_loader, train_sampler

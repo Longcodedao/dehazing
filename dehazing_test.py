@@ -5,6 +5,9 @@ import torch.optim as optim
 from torchmetrics import MeanMetric, MetricCollection
 from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
@@ -28,6 +31,34 @@ from config import get_cfg_defaults
 
 import os
 import argparse
+from utils import set_seed, get_loaders_for_stage
+
+
+# %%
+# -----------------------------------------------------
+# DDP Setup Helpers
+# -----------------------------------------------------
+def setup_ddp():
+    dist.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank
+
+
+def clean_ddp():
+    dist.destroy_process_group()
+
+
+def is_main_process():
+    return dist.get_rank() == 0.0
+
+
+def reduce_tensor(tensor):
+    """Reduces a tensor across all GPUs (averages it) for metric logging."""
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
+    rt /= dist.get_world_size()
+    return rt
 
 
 # %%
@@ -107,12 +138,12 @@ def setup_config(args):
     cfg = get_cfg_defaults()
 
     # 2. Merge YAML file
-    if args.config_file:
+    if args.pretrain_config:
         try:
-            cfg.merge_from_file(args.config_file)
-            print(f"[+] Loaded config from {args.config_file}")
+            cfg.merge_from_file(args.pretrain_config)
+            print(f"[+] Loaded config from {args.pretrain_config}")
         except Exception as e:
-            print(f"[-] Error merging config file {args.config_file}: {e}")
+            print(f"[-] Error merging config file {args.pretrain_config}: {e}")
 
     # 3. Merge Specific CLI arguments
     # We only update if the argument is NOT None (i.e., user actually typed it)
@@ -165,16 +196,23 @@ class DehazeTrainer:
         cfg,
         net_G,
         net_D,
-        train_loader,
-        val_loader,
-        device,
+        local_rank,
         vgg16_config_path="vgg16_features.json",
     ):
         self.cfg = cfg
-        self.device = device
+        self.local_rank = local_rank
+        self.device = torch.device(f"cuda:{local_rank}")
+
+        # Models to device
         self.net_G = net_G.to(self.device)
         self.net_D = net_D.to(self.device)
-        self.ode_solver = ODESolver(self.net_G)
+        # Wrap with DDP
+        # find_unused_parameters=True might be needed if not all layers are used in every forward pass
+        self.net_G = DDP(self.net_G, device_ids=[local_rank], output_device=local_rank)
+        self.net_D = DDP(self.net_D, device_ids=[local_rank], output_device=local_rank)
+
+        # Note: Access underlying model for inference/sampling using .module
+        self.ode_solver = ODESolver(self.net_G.module)
 
         # Declaring the Optimizers
         self.opt_G = optim.Adam(
@@ -196,8 +234,10 @@ class DehazeTrainer:
             self.opt_D, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
         )
 
-        self.train_loader = train_loader
-        self.val_loader = val_loader
+        # Placeholders
+        self.train_loader = None
+        self.val_loader = None
+        self.train_sampler = None
 
         # Initialize Loss functions
         self.loss_adversarial = AdversarialLoss()
@@ -227,9 +267,23 @@ class DehazeTrainer:
         self.epoch = 1
 
         # TensorBoard Setup
-        self.writer = SummaryWriter(cfg.LOG_DIR)
+        if is_main_process():
+            self.writer = SummaryWriter(cfg.LOG_DIR)
+        else:
+            self.writer = None
+
+    def load_dataloader(self, dataloader, mode="train"):
+        if mode == "train":
+            self.train_loader = dataloader
+        elif mode == "eval":
+            self.val_loader = dataloader
+        else:
+            raise ValueError("Only support 2 modes ('train' and 'eval')")
 
     def save_checkpoints(self, path):
+        if not is_main_process():
+            return
+
         G_state_dict = self.net_G.state_dict()
         D_state_dict = self.net_G.state_dict()
 
@@ -253,25 +307,27 @@ class DehazeTrainer:
         Uses .get() and checks keys to ensure partial checkpoints
         (e.g., inference-only weights) don't crash the training loop.
         """
+        # Map location is crucial for DDP loading to avoid CUDA OOM or device mismatch
+        map_location = {"cuda:%d" % 0: "cuda:%d" % self.local_rank}
+
         if not os.path.exists(path):
-            print(f"[-] No checkpoint found at '{path}'. Starting from scratch.")
+            if is_main_process():
+                print(f"[-] No checkpoint found at '{path}'. Starting from scratch.")
             return
 
-        print(f"[+] Loading checkpoint from '{path}'...")
+        if is_main_process():
+            print(f"[+] Loading checkpoint from '{path}'...")
 
-        # Load to CPU first to prevent GPU OOM, then map to device
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=map_location)
 
         # 1. Load Models (Weights)
         # strict=False allows loading even if some layers (like a new head) are missing
         if "G_state_dict" in checkpoint:
-            self.net_G.load_state_dict(checkpoint["G_state_dict"], strict=False)
+            self.net_G.module.load_state_dict(checkpoint["G_state_dict"], strict=False)
             print("    - Generator weights loaded.")
-        else:
-            print("    [!] Generator weights NOT found.")
 
         if "D_state_dict" in checkpoint:
-            self.net_D.load_state_dict(checkpoint["D_state_dict"], strict=False)
+            self.net_D.module.load_state_dict(checkpoint["D_state_dict"], strict=False)
             print("    - Discriminator weights loaded.")
 
         # 2. Load Optimizers (Only if they exist - crucial for resuming training)
@@ -296,10 +352,17 @@ class DehazeTrainer:
     def train_epoch(self, epoch):
         self.net_G.train()
         self.net_D.train()
-
         self.train_metrics.reset()
 
-        pbar = tqdm(self.train_loader, desc=f"Stage {self.stage_index} | Epoch {epoch}")
+        if self.train_sampler is not None:
+            self.train_sampler.set_epoch(epoch)
+
+        pbar = self.train_loader
+        if is_main_process():
+            pbar = tqdm(
+                self.train_loader, desc=f"Stage {self.stage_index} | Epoch {epoch}"
+            )
+
         for idx, batch in enumerate(pbar):
             # x1: Clean image, x0: Hazy Image
             # I use this notation to match the Flow Matching definition
@@ -369,53 +432,52 @@ class DehazeTrainer:
             self.scaler.step(self.opt_D)
             self.scaler.update()
 
+            # Update local metrics
             self.train_metrics["L_gen"].update(loss_g.detach())
             self.train_metrics["L_dis"].update(loss_d.detach())
             self.train_metrics["L_flow"].update(loss_flow.detach())
             self.train_metrics["L_pixel"].update(loss_pixels.detach())
             self.train_metrics["L_perceptual"].update(loss_pixels.detach())
 
-            if idx % 10 == 0:
-                # Compute returns the average over all batches seen so far in this epoch
-                avg_g = self.train_metrics["L_gen"].compute()
-                avg_d = self.train_metrics["L_dis"].compute()
-                avg_flow = self.train_metrics["L_flow"].compute()
-
+            if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
                 pbar.set_postfix(
-                    {
-                        "Loss G": f"{avg_g:.4f}",
-                        "Loss D": f"{avg_d:.4f}",
-                        "Flow": f"{avg_flow:.4f}",  # Instantaneous value
-                    }
+                    {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
                 )
+
         self.scheduler_G.step()
         self.scheduler_D.step()
 
         # Save results preparing for TensorBoard Logging
-        result = self.train_metrics.compute()
+        # result = self.train_metrics.compute()
+        result = {}
+        for key, metric in self.train_metrics.items():
+            val = metric.compute()
+            reduced_val = reduce_tensor(val)
+            result[key] = reduced_val
 
-        # TensorBoard Logging for Training Losses
-        self.writer.add_scalar(
-            f"Loss/Stage_{self.stage_index}/G_Total", loss_g.item(), epoch
-        )
-        self.writer.add_scalar(
-            f"Loss/Stage_{self.stage_index}/D_Total", loss_d.item(), epoch
-        )
-        self.writer.add_scalar(
-            f"Loss/Stage_{self.stage_index}/Flow_Epoch",
-            result["L_flow"].item(),
-            epoch,
-        )
-        self.writer.add_scalar(
-            f"Loss/Stage_{self.stage_index}/Pixel_Epoch",
-            result["L_pixel"].item(),
-            epoch,
-        )
-        self.writer.add_scalar(
-            f"Loss/Stage_{self.stage_index}/Perceptual_Epoch",
-            result["L_perceptual"].item(),
-            epoch,
-        )
+        if is_main_process():
+            # TensorBoard Logging for Training Losses
+            self.writer.add_scalar(
+                f"Loss/Stage_{self.stage_index}/G_Total", loss_g.item(), epoch
+            )
+            self.writer.add_scalar(
+                f"Loss/Stage_{self.stage_index}/D_Total", loss_d.item(), epoch
+            )
+            self.writer.add_scalar(
+                f"Loss/Stage_{self.stage_index}/Flow_Epoch",
+                result["L_flow"].item(),
+                epoch,
+            )
+            self.writer.add_scalar(
+                f"Loss/Stage_{self.stage_index}/Pixel_Epoch",
+                result["L_pixel"].item(),
+                epoch,
+            )
+            self.writer.add_scalar(
+                f"Loss/Stage_{self.stage_index}/Perceptual_Epoch",
+                result["L_perceptual"].item(),
+                epoch,
+            )
 
         return result
 
@@ -423,9 +485,12 @@ class DehazeTrainer:
     def eval_epoch(self, epoch):
         self.net_G.eval()
         self.net_D.eval()
-
         self.eval_metrics.reset()
-        pbar = tqdm(self.val_loader, "Evaluating")
+
+        pbar = self.val_loader
+        if is_main_process():
+            pbar = tqdm(self.val_loader, "Evaluating")
+
         for idx, batch in enumerate(pbar):
             x1, x0 = batch
             x1 = x1.to(self.device)
@@ -449,22 +514,30 @@ class DehazeTrainer:
 
             psnr_value = self.eval_metrics["psnr"].compute()
             ssim_value = self.eval_metrics["ssim"].compute()
-            pbar.set_postfix(
-                {
-                    "PSNR": f"{psnr_value:.4f}",
-                    "SSIM": f"{ssim_value:.4f}",
-                }
+
+            if is_main_process() and isinstance(pbar, tqdm):
+                pbar.set_postfix(
+                    {
+                        "PSNR": f"{psnr_value:.4f}",
+                        "SSIM": f"{ssim_value:.4f}",
+                    }
+                )
+        # Compute the local Results
+        local_psnr = self.eval_metrics["psnr"].compute()
+        local_ssim = self.eval_metrics["ssim"].compute()
+
+        result = {}
+        # Reduce across all GPUs
+        result["psnr"] = reduce_tensor(local_psnr)
+        result["ssim"] = reduce_tensor(local_ssim)
+
+        if is_main_process():
+            self.writer.add_scalar(
+                f"Metrics/Stage_{self.stage_index}/PSNR", result["psnr"].item(), epoch
             )
-
-        # Calcualt
-        result = self.eval_metrics.compute()
-
-        self.writer.add_scalar(
-            f"Metrics/Stage_{self.stage_index}/PSNR", result["psnr"].item(), epoch
-        )
-        self.writer.add_scalar(
-            f"Metrics/Stage_{self.stage_index}/SSIM", result["ssim"].item(), epoch
-        )
+            self.writer.add_scalar(
+                f"Metrics/Stage_{self.stage_index}/SSIM", result["ssim"].item(), epoch
+            )
         return result
 
     def train_stage(
@@ -473,7 +546,7 @@ class DehazeTrainer:
         """Runs the complete training cycle for a single stage (resolution)."""
         self.stage_index = stage_index
         best_metric = -float("inf")
-        epochs_no_improve = 0.0
+        epochs_no_improve = 0
 
         # Load the latest checkpoint for this stage if it exists
         # We will check for the checkpoint structure: checkpoints/chkpoint_e*_s{stage_index}.pt
@@ -496,46 +569,63 @@ class DehazeTrainer:
             f"[!] Stage {stage_index} starts at epoch {self.epoch} out of {total_epochs}."
         )
 
+        # Important: Sync start epoch across processes just in case
+        # (Though if they all read the file, they should be same)
+        dist.barrier()
+
+        if not self.train_loader or not self.val_loader:
+            raise RuntimeError(
+                "You need to add the train_loader and val_loader to train.\nHInt: Using self.load_dataloader"
+            )
+
         for epoch in range(self.epoch, total_epochs + 1):
             # --- Training ---
-            # train_results = self.train_epoch(epoch)
+            train_results = self.train_epoch(epoch)
 
             # --- Validation ---
             val_results = self.eval_epoch(epoch)
 
-            print(f"Stage {stage_index} Epoch {epoch} Results:")
-            # print(
-            #    f"  Train: L_G={train_results['L_gen']:.4f}, L_D={train_results['L_dis']:.4f}"
-            # )
-            print(
-                f"  Eval: PSNR={val_results['psnr']:.4f}, SSIM={val_results['ssim']:.4f}"
-            )
+            if is_main_process():
+                print(f"Stage {stage_index} Epoch {epoch} Results:")
+                print(
+                    f"  Train: L_G={train_results['L_gen']:.4f}, L_D={train_results['L_dis']:.4f}"
+                )
+                print(
+                    f"  Eval: PSNR={val_results['psnr']:.4f}, SSIM={val_results['ssim']:.4f}"
+                )
 
             # Use PSNR as the metric to track improvement
             current_metric = val_results["psnr"].item()
 
             # --- Checkpointing and Early Stopping ---
-            if current_metric > best_metric:
-                best_metric = current_metric
-                epochs_no_improve = 0
+            if is_main_process():
+                if current_metric > best_metric:
+                    best_metric = current_metric
+                    epochs_no_improve = 0
 
-                # Save the BEST checkpoint
-                best_checkpoint_dir = os.path.join(
-                    checkpoint_dir, f"chkpoint_best_s{stage_index}.pt"
-                )
-                self.save_checkpoints(best_checkpoint_dir)
-            else:
-                epochs_no_improve += 1
+                    # Save the BEST checkpoint
+                    best_checkpoint_dir = os.path.join(
+                        checkpoint_dir, f"chkpoint_best_s{stage_index}.pt"
+                    )
+                    self.save_checkpoints(best_checkpoint_dir)
+                else:
+                    epochs_no_improve += 1
 
-            # Save the latest checkpoint
-            if epoch % checkpoint_interval == 0:
-                latest_checkpoint_dir = os.path.join(
-                    checkpoint_dir, f"chkpoint_e{epoch}_s{stage_index}.pt"
-                )
-                self.save_checkpoints(latest_checkpoint_dir)
+                # Save the latest checkpoint
+                if epoch % checkpoint_interval == 0:
+                    latest_checkpoint_dir = os.path.join(
+                        checkpoint_dir, f"chkpoint_e{epoch}_s{stage_index}.pt"
+                    )
+                    self.save_checkpoints(latest_checkpoint_dir)
 
-            if epochs_no_improve >= patience:
-                print(f"[!] Early stopping triggered at epoch {epoch}")
+            stop_signal = torch.tensor(1 if epochs_no_improve >= patience else 0).to(
+                self.device
+            )
+            dist.broadcast(stop_signal, src=0)
+
+            if stop_signal.item() == 1:
+                if is_main_process():
+                    print(f"[!] Early stopping triggered at epoch {epoch}")
                 break
 
         # Close TensorBoard writer after stage completion
@@ -546,29 +636,26 @@ class DehazeTrainer:
 ## Training Schedule
 ## Getting the cfg file
 
-
 if __name__ == "__main__":
-    # 1. Parse Args
+    # 1. DDP Init
+    local_rank = setup_ddp()
+
+    # 2. Parse Args & Config
     args = create_args()
-
-    # 2. Setup Configuration
     cfg = setup_config(args)
+    set_seed(cfg.SEED + local_rank)
 
-    # 3. Setup SEED
-    set_seed(cfg.SEED)
+    if is_main_process():
+        print("Configuration: ")
+        print(cfg)
+        print(f"\n[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
 
-    device = torch.device("cuda:3" if cfg.DEVICE == "cuda" else "cpu")
-
-    print("Configuration: ")
-    print(cfg)
-
-    print(f"\n\n[+] Starting Progressive Training with {len(cfg.SCHEDULE)} stages.")
+    # 3. Models
+    # Initialize on CPU or specific deviec first
     net_G = UNet()
     net_D = Discriminator()
     # We will load the train_loader and val_loader inside the stage
-    trainer = DehazeTrainer(
-        cfg, net_G, net_D, train_loader=None, val_loader=None, device=device
-    )
+    trainer = DehazeTrainer(cfg, net_G, net_D, local_rank)
 
     # Iterate through the schedule and confirm each stage is a CfgNode
     for i, stage in enumerate(cfg.SCHEDULE):
@@ -579,15 +666,19 @@ if __name__ == "__main__":
         epochs = stage.EPOCHS
         patience = stage.PATIENCE
 
-        print("\n==============================================")
-        print(
-            f"STAGE {stage_index}: Resolution={resolution}x{resolution}, Batch={batch_size}"
-        )
-        print("==============================================")
+        if is_main_process():
+            print("\n==============================================")
+            print(
+                f"STAGE {stage_index}: Resolution={resolution}x{resolution}, Batch={batch_size} Epochs={epochs}"
+            )
+            print("==============================================")
 
-        train_loader, val_loader = get_loaders_for_stage(cfg, resolution, batch_size)
-        trainer.train_loader = train_loader
-        trainer.val_loader = val_loader
+        train_loader, val_loader, train_sampler = get_loaders_for_stage(
+            cfg, resolution, batch_size
+        )
+        trainer.load_dataloader(train_loader, mode="train")
+        trainer.load_dataloader(val_loader, mode="eval")
+        trainer.train_sampler = train_sampler
 
         # 2. Run the training for this stage
         trainer.train_stage(
@@ -598,8 +689,13 @@ if __name__ == "__main__":
             checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
         )
 
-    print("\n[+] Progressive Training Complete.")
-    trainer.writer.close()
+        dist.barrier()
+
+    if is_main_process():
+        print("\n[+] Progressive Training Complete.")
+        trainer.writer.close()
+
+    clean_ddp()
 
 # %%
 ## Loading DenseHaze dataset

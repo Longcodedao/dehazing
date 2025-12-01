@@ -7,7 +7,6 @@ from torch.utils.tensorboard import SummaryWriter
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data.distributed import DistributedSampler
 
 # from tqdm.notebook import tqdm
 from tqdm import tqdm
@@ -31,7 +30,10 @@ from config import get_cfg_defaults
 
 import os
 import argparse
-from utils import set_seed, get_loaders_for_stage
+from utils import convert_cfg_to_dict, set_seed, get_loaders_for_stage
+import io
+from contextlib import redirect_stdout
+import yaml
 
 
 # %%
@@ -568,23 +570,30 @@ class DehazeTrainer:
         # Load the latest checkpoint for this stage if it exists
         # We will check for the checkpoint structure: checkpoints/chkpoint_e*_s{stage_index}.pt
         self.epoch = 1
-        if os.path.exists(checkpoint_dir):
+        best_checkpoint_path = os.path.join(checkpoint_dir, "best")
+        os.makedirs(best_checkpoint_path, exist_ok=True)
+        latest_checkpoint_path = os.path.join(checkpoint_dir, "latest")
+        os.makedirs(latest_checkpoint_path, exists_ok=True)
+
+        if os.path.exists(latest_checkpoint_path):
             stage_files = [
                 f
-                for f in os.listdir(checkpoint_dir)
+                for f in os.listdir(latest_checkpoint_path)
                 if f.endswith(f"_s{stage_index}.pt")
             ]
+
             if stage_files:
                 latest_file = max(
                     stage_files, key=lambda f: int(f.split("_e")[1].split("_s")[0])
                 )
-                latest_path = os.path.join(checkpoint_dir, latest_file)
+                latest_path = os.path.join(latest_checkpoint_path, latest_file)
 
                 self.load_checkpoints(self, latest_path)
 
-        print(
-            f"[!] Stage {stage_index} starts at epoch {self.epoch} out of {total_epochs}."
-        )
+        if is_main_process():
+            print(
+                f"[!] Stage {stage_index} starts at epoch {self.epoch} out of {total_epochs}."
+            )
 
         # Important: Sync start epoch across processes just in case
         # (Though if they all read the file, they should be same)
@@ -592,7 +601,7 @@ class DehazeTrainer:
 
         if not self.train_loader or not self.val_loader:
             raise RuntimeError(
-                "You need to add the train_loader and val_loader to train.\nHInt: Using self.load_dataloader"
+                "You need to add the train_loader and val_loader to train.\nHint: Using self.load_dataloader"
             )
 
         for epoch in range(self.epoch, total_epochs + 1):
@@ -622,7 +631,7 @@ class DehazeTrainer:
 
                     # Save the BEST checkpoint
                     best_checkpoint_dir = os.path.join(
-                        checkpoint_dir, f"chkpoint_best_s{stage_index}.pt"
+                        best_checkpoint_path, f"chkpoint_best_s{stage_index}.pt"
                     )
                     self.save_checkpoints(best_checkpoint_dir)
                 else:
@@ -631,7 +640,7 @@ class DehazeTrainer:
                 # Save the latest checkpoint
                 if epoch % checkpoint_interval == 0:
                     latest_checkpoint_dir = os.path.join(
-                        checkpoint_dir, f"chkpoint_e{epoch}_s{stage_index}.pt"
+                        interval_checkpoint_path, f"chkpoint_e{epoch}_s{stage_index}.pt"
                     )
                     self.save_checkpoints(latest_checkpoint_dir)
 
@@ -647,6 +656,9 @@ class DehazeTrainer:
 
         # Close TensorBoard writer after stage completion
         self.writer.close()
+
+
+# %%
 
 
 # %%
@@ -674,6 +686,16 @@ if __name__ == "__main__":
     # We will load the train_loader and val_loader inside the stage
     trainer = DehazeTrainer(cfg, net_G, net_D, local_rank)
 
+    if is_main_process():
+        # 1. Convert CfgNode to standard dict/list
+        cfg_dict = convert_cfg_to_dict(cfg)
+
+        # 2. Dump to YAML string safely
+        cfg_str = yaml.dump(cfg_dict, sort_keys=False, default_flow_style=False)
+
+        cfg_str = f"```yaml\n{cfg_str}\n```"
+        trainer.writer.add_text("Configuration/Settings", cfg_str, 0)
+
     # Iterate through the schedule and confirm each stage is a CfgNode
     for i, stage in enumerate(cfg.SCHEDULE):
         stage_index = i + 1
@@ -689,9 +711,30 @@ if __name__ == "__main__":
                 f"STAGE {stage_index}: Resolution={resolution}x{resolution}, Batch={batch_size} Epochs={epochs}"
             )
             print("==============================================")
+            # ------------------------------------------------------
+            # [NEW] Capture Transform Summary for THIS Stage
+            # ------------------------------------------------------
+            capture_buffer = io.StringIO()
+            with redirect_stdout(capture_buffer):
+                # We call this just to trigger the print statements.
+                # We use the CURRENT stage's resolution.
+                _, _, _ = get_loaders_for_stage(
+                    cfg, resolution, batch_size, verbose=True
+                )
+
+            aug_summary = capture_buffer.getvalue()
+
+            # Log to TensorBoard
+            # We use 'stage_index' as the global_step so you can scroll through stages in TB
+            trainer.writer.add_text(
+                "Augmentations/Stage_Summary",
+                f"```text\n{aug_summary}\n```",
+                global_step=stage_index,
+            )
+            # ------------------------------------------------------
 
         train_loader, val_loader, train_sampler = get_loaders_for_stage(
-            cfg, resolution, batch_size
+            cfg, resolution, batch_size, verbose=False
         )
         trainer.load_dataloader(train_loader, mode="train")
         trainer.load_dataloader(val_loader, mode="eval")

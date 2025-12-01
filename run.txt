@@ -1,0 +1,4 @@
+torchrun --nproc_per_node=4 dehazing_test.py \
+    --num_workers 4 \
+    --dataset_root "dataset/" 
+

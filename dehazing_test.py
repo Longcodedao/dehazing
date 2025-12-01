@@ -189,6 +189,13 @@ def setup_config(args):
 
 
 # %%
+## Helper (Toggle Gradients)
+def toggle_grad(model, requires_grad):
+    for p in model.parameters():
+        p.requires_grad = requires_grad
+
+
+# %%
 ## Trainer
 class DehazeTrainer:
     def __init__(
@@ -206,6 +213,14 @@ class DehazeTrainer:
         # Models to device
         self.net_G = net_G.to(self.device)
         self.net_D = net_D.to(self.device)
+
+        # Convert standard BN to SyncBN
+        if dist.get_world_size() > 1:
+            self.net_G = nn.SyncBatchNorm.convert_sync_batchnorm(self.net_G)
+            self.net_D = nn.SyncBatchNorm.convert_sync_batchnorm(self.net_D)
+            if self.local_rank == 0:
+                print("[+] Converted models to use SyncBatchNorm")
+
         # Wrap with DDP
         # find_unused_parameters=True might be needed if not all layers are used in every forward pass
         self.net_G = DDP(self.net_G, device_ids=[local_rank], output_device=local_rank)
@@ -257,8 +272,8 @@ class DehazeTrainer:
                 "L_perceptual": MeanMetric().to(self.device),
             }
         )
-        self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(device)
-        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
 
         self.eval_metrics = MetricCollection(
             {"psnr": MeanMetric().to(self.device), "ssim": MeanMetric().to(self.device)}
@@ -358,91 +373,93 @@ class DehazeTrainer:
             self.train_sampler.set_epoch(epoch)
 
         pbar = self.train_loader
-        if is_main_process():
-            pbar = tqdm(
-                self.train_loader, desc=f"Stage {self.stage_index} | Epoch {epoch}"
-            )
+        with torch.autograd.set_detect_anomaly(True):
+            for idx, batch in enumerate(pbar):
+                # x1: Clean image, x0: Hazy Image
+                # I use this notation to match the Flow Matching definition
+                x1, x0 = batch
+                x1 = x1.to(self.device)
+                x0 = x0.to(self.device)
+                batch_size = x1.shape[0]
 
-        for idx, batch in enumerate(pbar):
-            # x1: Clean image, x0: Hazy Image
-            # I use this notation to match the Flow Matching definition
-            x1, x0 = batch
-            x1 = x1.to(self.device)
-            x0 = x0.to(self.device)
-            batch_size = x1.shape[0]
+                clean_imgs = x1
+                hazy_imgs = x0
 
-            clean_imgs = x1
-            hazy_imgs = x0
+                # ------------- Generator --------------------
+                # Turn off the gradients of the Discriminator
+                # Only updating the Generator only
+                toggle_grad(self.net_D, requires_grad=False)
+                self.opt_G.zero_grad(set_to_none=True)
 
-            self.opt_G.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=self.device.type):
-                # Randomize the timestamp (from 0 - 1 for constructing the path)
-                t = torch.rand(batch_size, device=self.device)
-                x_t, u_t = path_sampler(x0, x1, t)
+                with torch.autocast(device_type=self.device.type):
+                    # Randomize the timestamp (from 0 - 1 for constructing the path)
+                    t = torch.rand(batch_size, device=self.device)
+                    x_t, u_t = path_sampler(x0, x1, t)
 
-                # Generator should take x_t, not x0 (Flow Matching)
-                v_t = self.net_G(x_t, t)
+                    # Generator should take x_t, not x0 (Flow Matching)
+                    v_t = self.net_G(x_t, t)
 
-                # Fast, single step approximation constructing the image
-                pred_imgs = x0 + v_t
+                    # Fast, single step approximation constructing the image
+                    pred_imgs = x0 + v_t
 
-                # Training for the generator
-                fake_output = self.net_D(pred_imgs)
+                    # Training for the generator
+                    fake_output = self.net_D(pred_imgs)
 
-                loss_pixels = self.loss_pixels(pred_imgs, clean_imgs)
-                loss_flow = self.loss_flow(v_t, u_t)
-                loss_perceptual = self.loss_perceptual(
-                    pred_imgs,
-                    clean_imgs,
-                    content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
-                    style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
-                    display=False,
-                )
-                loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
-                loss_g = (
-                    self.cfg.LOSS.W_FLOW * loss_flow
-                    + self.cfg.LOSS.W_PIXELS * loss_pixels
-                    + self.cfg.LOSS.W_PERC * loss_perceptual
-                    + self.cfg.LOSS.W_GEN * loss_gen
-                )
+                    loss_pixels = self.loss_pixels(pred_imgs, clean_imgs)
+                    loss_flow = self.loss_flow(v_t, u_t)
+                    loss_perceptual = self.loss_perceptual(
+                        pred_imgs,
+                        clean_imgs,
+                        content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
+                        style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
+                        display=False,
+                    )
+                    loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
+                    loss_g = (
+                        self.cfg.LOSS.W_FLOW * loss_flow
+                        + self.cfg.LOSS.W_PIXELS * loss_pixels
+                        + self.cfg.LOSS.W_PERC * loss_perceptual
+                        + self.cfg.LOSS.W_GEN * loss_gen
+                    )
 
-            #                if idx % 50 == 0:
-            #                    print("[DEBUG] Batch index: ", idx)
-            #                    print("[DEBUG] Loss Pixels: ", loss_pixels.item())
-            #                    print("[DEBUG] Loss Flow: ", loss_flow.item())
-            #                    print("[DEBUG] Loss Perceptual: ", loss_perceptual.item())
-            #                    print("[DEBUG] Loss Gen: ", loss_gen.item())
-            #                    print("[DEBUG] Total Loss Generative: ", loss_g.item())
-            #                    print("-----------------------------------------")
+                self.scaler.scale(loss_g).backward()
+                self.scaler.step(self.opt_G)
+                self.scaler.update()
 
-            self.scaler.scale(loss_g).backward()
-            self.scaler.step(self.opt_G)
+                # ------------ Discriminator ------------------
+                # Turn the gradients of self.net_D on to update the Discriminator
+                # Only update the Discriminator
+                toggle_grad(self.net_D, requires_grad=True)
+                self.opt_D.zero_grad(set_to_none=True)
+                with torch.autocast(device_type=self.device.type):
+                    detached_fake = pred_imgs.detach()
+                    #
+                    # Concatenate the Real and Fake Images to pass only once
+                    combined_input = torch.cat([clean_imgs, detached_fake], dim=0)
+                    combined_output = self.net_D(combined_input)
 
-            self.opt_D.zero_grad(set_to_none=True)
-            with torch.autocast(device_type=self.device.type):
-                real_output = self.net_D(clean_imgs)
-                # Need to run the D(fake) again
-                fake_output = self.net_D(pred_imgs.detach())
+                    current_batch_size = clean_imgs.shape[0]
+                    real_output = combined_output[:current_batch_size]
+                    fake_output = combined_output[current_batch_size:]
+                    loss_d = self.loss_adversarial(
+                        D_out_real=real_output, D_out_fake=fake_output, mode="D"
+                    )
 
-                loss_d = self.loss_adversarial(
-                    D_out_real=real_output, D_out_fake=fake_output, mode="D"
-                )
+                self.scaler.scale(loss_d).backward()
+                self.scaler.step(self.opt_D)
+                self.scaler.update()
 
-            self.scaler.scale(loss_d).backward()
-            self.scaler.step(self.opt_D)
-            self.scaler.update()
+                # Update local metrics
+                self.train_metrics["L_gen"].update(loss_g.detach())
+                self.train_metrics["L_dis"].update(loss_d.detach())
+                self.train_metrics["L_flow"].update(loss_flow.detach())
+                self.train_metrics["L_pixel"].update(loss_pixels.detach())
+                self.train_metrics["L_perceptual"].update(loss_pixels.detach())
 
-            # Update local metrics
-            self.train_metrics["L_gen"].update(loss_g.detach())
-            self.train_metrics["L_dis"].update(loss_d.detach())
-            self.train_metrics["L_flow"].update(loss_flow.detach())
-            self.train_metrics["L_pixel"].update(loss_pixels.detach())
-            self.train_metrics["L_perceptual"].update(loss_pixels.detach())
-
-            if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
-                pbar.set_postfix(
-                    {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
-                )
+                if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
+                    pbar.set_postfix(
+                        {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
+                    )
 
         self.scheduler_G.step()
         self.scheduler_D.step()

@@ -105,6 +105,14 @@ def get_haze_transforms(
         ]
     )
 
+    eval_transforms = v2.Compose(
+        [
+            v2.ToImage(),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
+        ]
+    )
+
     if split == "train":
         geometric_sync_transforms = v2.Compose(
             [
@@ -177,8 +185,8 @@ def get_haze_transforms(
     else:  # split == "val" or "test"
         # --- Handle Validation/Test Split ---
         def val_transform(clear_img, hazy_img):
-            clean_img = common_transforms(clear_img)
-            hazy_img = common_transforms(hazy_img)
+            clean_img = eval_transforms(clear_img)
+            hazy_img = eval_transforms(hazy_img)
             return clean_img, hazy_img
 
         if verbose:
@@ -186,7 +194,7 @@ def get_haze_transforms(
                 name=f"Dataset: {dataset_name}\tValidation/Test Split (Size: {resize_size}x{resize_size})",
                 geometric_sync=v2.Identity(),  # No random geometric transforms
                 haze_only=v2.Identity(),  # No color jitter/grayscale
-                common=common_transforms,
+                common=eval_transforms,
             )
         return val_transform
 

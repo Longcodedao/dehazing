@@ -1,4 +1,8 @@
 torchrun --nproc_per_node=4 dehazing_test.py \
     --num_workers 4 \
-    --dataset_root "dataset/" 
-
+    --dataset_root "dataset/" \
+    --log_dir "runs/flow_matching_v1/" \
+    --checkpoint_dir "checkpoints/flow_matching_v1/"
+    
+    
+NEXT JOB: Change the augmentation in the Val Transform to not include Resize in that and try to hold the original resolution as much as possible (Using padding to get the shape to be multiple of 16)

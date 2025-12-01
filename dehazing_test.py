@@ -1,6 +1,7 @@
 # %%
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torchmetrics import MeanMetric, MetricCollection
 from torch.utils.tensorboard import SummaryWriter
@@ -197,6 +198,40 @@ def toggle_grad(model, requires_grad):
         p.requires_grad = requires_grad
 
 
+## Pad the images for evaluation
+def pad_to_multiple(image_tensor, multiple=16):
+    """
+    Pads the height (H) and width (W) of the image_tensor (B, C, H, W)
+    to be a multiple of the specified factor.
+    """
+    b, c, h, w = image_tensor.shape
+
+    # Calculate required padded dimensions
+    pad_h = (multiple - (h % multiple)) % multiple
+    pad_w = (multiple - (w % multiple)) % multiple
+
+    # Apply padding only to the bottom and right
+    # (padding_left, padding_right, padding_top, padding_bottom)
+    padded_tensor = F.pad(image_tensor, (0, pad_w, 0, pad_h), mode="reflect")
+
+    return padded_tensor, pad_h, pad_w
+
+
+## Unpad the image
+def unpad(padded_tensor, pad_h, pad_w):
+    """
+    Crops the padded tensor back to the original size.
+    """
+    if pad_h == 0 and pad_w == 0:
+        return padded_tensor
+
+    h_padded = padded_tensor.shape[2]
+    w_padded = padded_tensor.shape[3]
+
+    # Crop from (0, 0) up to (h_padded - pad_h, w_padded - pad_w)
+    return padded_tensor[:, :, : h_padded - pad_h, : w_padded - pad_w]
+
+
 # %%
 ## Trainer
 class DehazeTrainer:
@@ -302,7 +337,7 @@ class DehazeTrainer:
             return
 
         G_state_dict = self.net_G.state_dict()
-        D_state_dict = self.net_G.state_dict()
+        D_state_dict = self.net_D.state_dict()
 
         checkpoints = {
             "epoch": self.epoch,
@@ -375,93 +410,99 @@ class DehazeTrainer:
             self.train_sampler.set_epoch(epoch)
 
         pbar = self.train_loader
-        with torch.autograd.set_detect_anomaly(True):
-            for idx, batch in enumerate(pbar):
-                # x1: Clean image, x0: Hazy Image
-                # I use this notation to match the Flow Matching definition
-                x1, x0 = batch
-                x1 = x1.to(self.device)
-                x0 = x0.to(self.device)
-                batch_size = x1.shape[0]
+        if is_main_process():
+            pbar = tqdm(
+                self.train_loader,
+                desc=f"Stage {self.stage_index} | Epoch {epoch}",
+                leave=True,
+            )
 
-                clean_imgs = x1
-                hazy_imgs = x0
+        for idx, batch in enumerate(pbar):
+            # x1: Clean image, x0: Hazy Image
+            # I use this notation to match the Flow Matching definition
+            x1, x0 = batch
+            x1 = x1.to(self.device)
+            x0 = x0.to(self.device)
+            batch_size = x1.shape[0]
 
-                # ------------- Generator --------------------
-                # Turn off the gradients of the Discriminator
-                # Only updating the Generator only
-                toggle_grad(self.net_D, requires_grad=False)
-                self.opt_G.zero_grad(set_to_none=True)
+            clean_imgs = x1
+            hazy_imgs = x0
 
-                with torch.autocast(device_type=self.device.type):
-                    # Randomize the timestamp (from 0 - 1 for constructing the path)
-                    t = torch.rand(batch_size, device=self.device)
-                    x_t, u_t = path_sampler(x0, x1, t)
+            # ------------- Generator --------------------
+            # Turn off the gradients of the Discriminator
+            # Only updating the Generator only
+            toggle_grad(self.net_D, requires_grad=False)
+            self.opt_G.zero_grad(set_to_none=True)
 
-                    # Generator should take x_t, not x0 (Flow Matching)
-                    v_t = self.net_G(x_t, t)
+            with torch.autocast(device_type=self.device.type):
+                # Randomize the timestamp (from 0 - 1 for constructing the path)
+                t = torch.rand(batch_size, device=self.device)
+                x_t, u_t = path_sampler(x0, x1, t)
 
-                    # Fast, single step approximation constructing the image
-                    pred_imgs = x0 + v_t
+                # Generator should take x_t, not x0 (Flow Matching)
+                v_t = self.net_G(x_t, t)
 
-                    # Training for the generator
-                    fake_output = self.net_D(pred_imgs)
+                # Fast, single step approximation constructing the image
+                pred_imgs = x0 + v_t
 
-                    loss_pixels = self.loss_pixels(pred_imgs, clean_imgs)
-                    loss_flow = self.loss_flow(v_t, u_t)
-                    loss_perceptual = self.loss_perceptual(
-                        pred_imgs,
-                        clean_imgs,
-                        content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
-                        style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
-                        display=False,
-                    )
-                    loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
-                    loss_g = (
-                        self.cfg.LOSS.W_FLOW * loss_flow
-                        + self.cfg.LOSS.W_PIXELS * loss_pixels
-                        + self.cfg.LOSS.W_PERC * loss_perceptual
-                        + self.cfg.LOSS.W_GEN * loss_gen
-                    )
+                # Training for the generator
+                fake_output = self.net_D(pred_imgs)
 
-                self.scaler.scale(loss_g).backward()
-                self.scaler.step(self.opt_G)
-                self.scaler.update()
+                loss_pixels = self.loss_pixels(pred_imgs, clean_imgs)
+                loss_flow = self.loss_flow(v_t, u_t)
+                loss_perceptual = self.loss_perceptual(
+                    pred_imgs,
+                    clean_imgs,
+                    content_weight=self.cfg.LOSS.PERCEPTUAL.CONTENT,
+                    style_weight=self.cfg.LOSS.PERCEPTUAL.STYLE,
+                    display=False,
+                )
+                loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
+                loss_g = (
+                    self.cfg.LOSS.W_FLOW * loss_flow
+                    + self.cfg.LOSS.W_PIXELS * loss_pixels
+                    + self.cfg.LOSS.W_PERC * loss_perceptual
+                    + self.cfg.LOSS.W_GEN * loss_gen
+                )
 
-                # ------------ Discriminator ------------------
-                # Turn the gradients of self.net_D on to update the Discriminator
-                # Only update the Discriminator
-                toggle_grad(self.net_D, requires_grad=True)
-                self.opt_D.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=self.device.type):
-                    detached_fake = pred_imgs.detach()
-                    #
-                    # Concatenate the Real and Fake Images to pass only once
-                    combined_input = torch.cat([clean_imgs, detached_fake], dim=0)
-                    combined_output = self.net_D(combined_input)
+            self.scaler.scale(loss_g).backward()
+            self.scaler.step(self.opt_G)
+            self.scaler.update()
 
-                    current_batch_size = clean_imgs.shape[0]
-                    real_output = combined_output[:current_batch_size]
-                    fake_output = combined_output[current_batch_size:]
-                    loss_d = self.loss_adversarial(
-                        D_out_real=real_output, D_out_fake=fake_output, mode="D"
-                    )
+            # ------------ Discriminator ------------------
+            # Turn the gradients of self.net_D on to update the Discriminator
+            # Only update the Discriminator
+            toggle_grad(self.net_D, requires_grad=True)
+            self.opt_D.zero_grad(set_to_none=True)
+            with torch.autocast(device_type=self.device.type):
+                detached_fake = pred_imgs.detach()
+                #
+                # Concatenate the Real and Fake Images to pass only once
+                combined_input = torch.cat([clean_imgs, detached_fake], dim=0)
+                combined_output = self.net_D(combined_input)
 
-                self.scaler.scale(loss_d).backward()
-                self.scaler.step(self.opt_D)
-                self.scaler.update()
+                current_batch_size = clean_imgs.shape[0]
+                real_output = combined_output[:current_batch_size]
+                fake_output = combined_output[current_batch_size:]
+                loss_d = self.loss_adversarial(
+                    D_out_real=real_output, D_out_fake=fake_output, mode="D"
+                )
 
-                # Update local metrics
-                self.train_metrics["L_gen"].update(loss_g.detach())
-                self.train_metrics["L_dis"].update(loss_d.detach())
-                self.train_metrics["L_flow"].update(loss_flow.detach())
-                self.train_metrics["L_pixel"].update(loss_pixels.detach())
-                self.train_metrics["L_perceptual"].update(loss_pixels.detach())
+            self.scaler.scale(loss_d).backward()
+            self.scaler.step(self.opt_D)
+            self.scaler.update()
 
-                if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
-                    pbar.set_postfix(
-                        {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
-                    )
+            # Update local metrics
+            self.train_metrics["L_gen"].update(loss_g.detach())
+            self.train_metrics["L_dis"].update(loss_d.detach())
+            self.train_metrics["L_flow"].update(loss_flow.detach())
+            self.train_metrics["L_pixel"].update(loss_pixels.detach())
+            self.train_metrics["L_perceptual"].update(loss_perceptual.detach())
+
+            if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
+                pbar.set_postfix(
+                    {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
+                )
 
         self.scheduler_G.step()
         self.scheduler_D.step()
@@ -508,7 +549,7 @@ class DehazeTrainer:
 
         pbar = self.val_loader
         if is_main_process():
-            pbar = tqdm(self.val_loader, "Evaluating")
+            pbar = tqdm(self.val_loader, "Evaluating", leave=True)
 
         for idx, batch in enumerate(pbar):
             x1, x0 = batch
@@ -518,9 +559,12 @@ class DehazeTrainer:
             clean_imgs = x1
             hazy_imgs = x0
 
-            with torch.autocast(device_type=self.device.type):
-                pred_imgs = self.ode_solver.sample(hazy_imgs)
+            padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=16)
 
+            with torch.autocast(device_type=self.device.type):
+                pred_padded = self.ode_solver.sample(padded_hazy)
+
+            pred_imgs = unpad(pred_padded, pad_h, pad_w)
             pred_original = restandardize_tensor(pred_imgs)
             target_original = restandardize_tensor(clean_imgs)
 
@@ -573,7 +617,7 @@ class DehazeTrainer:
         best_checkpoint_path = os.path.join(checkpoint_dir, "best")
         os.makedirs(best_checkpoint_path, exist_ok=True)
         latest_checkpoint_path = os.path.join(checkpoint_dir, "latest")
-        os.makedirs(latest_checkpoint_path, exists_ok=True)
+        os.makedirs(latest_checkpoint_path, exist_ok=True)
 
         if os.path.exists(latest_checkpoint_path):
             stage_files = [
@@ -640,7 +684,7 @@ class DehazeTrainer:
                 # Save the latest checkpoint
                 if epoch % checkpoint_interval == 0:
                     latest_checkpoint_dir = os.path.join(
-                        interval_checkpoint_path, f"chkpoint_e{epoch}_s{stage_index}.pt"
+                        latest_checkpoint_path, f"chkpoint_e{epoch}_s{stage_index}.pt"
                     )
                     self.save_checkpoints(latest_checkpoint_dir)
 
@@ -655,7 +699,8 @@ class DehazeTrainer:
                 break
 
         # Close TensorBoard writer after stage completion
-        self.writer.close()
+        if is_main_process():
+            self.writer.close()
 
 
 # %%

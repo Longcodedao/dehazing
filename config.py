@@ -75,6 +75,12 @@ _C.LOSS.PERCEPTUAL.VGG_BACKBONE = "VGG16"
 # 'configs/train_cfgs/pretrain_schedule.yaml' when you call cfg.merge_from_file().
 _C.SCHEDULE = []
 
+# -----------------------------------------------------------------------------
+# Evaluation Parameters (Add this section)
+# -----------------------------------------------------------------------------
+_C.EVAL = CN()
+_C.EVAL.BATCH_SIZE = 4  # Force this to 1 to prevent OOM on high-res images
+
 
 # -----------------------------------------------------------------------------
 # Config Helper
@@ -83,4 +89,3 @@ def get_cfg_defaults():
     """Get a yacs CfgNode object with default values."""
     # Return a clone so we can't accidentally alter the global instance
     return _C.clone()
-

@@ -96,7 +96,7 @@ def get_loaders_for_stage(cfg, resolution, batch_size, verbose=False):
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=batch_size,
+        batch_size=cfg.EVAL.BATCH_SIZE,
         shuffle=False,
         sampler=val_sampler,
         num_workers=cfg.NUM_WORKERS,

@@ -264,7 +264,7 @@ class DehazeTrainer:
         self.net_D = DDP(self.net_D, device_ids=[local_rank], output_device=local_rank)
 
         # Note: Access underlying model for inference/sampling using .module
-        self.ode_solver = ODESolver(self.net_G.module)
+        self.ode_solver = ODESolver(self.net_G.module, nfe=10)
 
         # Declaring the Optimizers
         self.opt_G = optim.Adam(
@@ -560,7 +560,7 @@ class DehazeTrainer:
             hazy_imgs = x0
 
             padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=16)
-
+            print("Padded Image size is: ", padded_hazy.shape)
             with torch.autocast(device_type=self.device.type):
                 pred_padded = self.ode_solver.sample(padded_hazy)
 

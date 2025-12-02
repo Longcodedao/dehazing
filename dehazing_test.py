@@ -414,6 +414,17 @@ class DehazeTrainer:
             self.scaler.step(self.opt_G)
             self.scaler.update()
 
+            self.train_metrics["L_flow"].update(loss_flow.detach())
+            self.train_metrics["L_pixel"].update(loss_pixels.detach())
+            self.train_metrics["L_perceptual"].update(loss_perceptual.detach())
+
+            self.train_metrics["L_gen"].update(loss_g.detach())
+
+            self.opt_G.zero_grad(set_to_none=True)  # Check if clearing helps
+
+            # 7. Cleanup Intermediates before Discriminator
+            # This simulates what happens if we don't manage memory well
+
             # ------------ Discriminator ------------------
             # Turn the gradients of self.net_D on to update the Discriminator
             # Only update the Discriminator
@@ -438,26 +449,23 @@ class DehazeTrainer:
             self.scaler.update()
 
             # Update local metrics
-            self.train_metrics["L_gen"].update(loss_g.detach())
+
             self.train_metrics["L_dis"].update(loss_d.detach())
-            self.train_metrics["L_flow"].update(loss_flow.detach())
-            self.train_metrics["L_pixel"].update(loss_pixels.detach())
-            self.train_metrics["L_perceptual"].update(loss_perceptual.detach())
 
             if is_main_process() and isinstance(pbar, tqdm) and (idx % 10 == 0):
                 pbar.set_postfix(
                     {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
                 )
 
-            del x1, x0, hazy_imgs, clean_imgs, x_t, u_t, v_t, pred_imgs
-            del loss_g, loss_d, loss_flow, loss_pixels, loss_perceptual, loss_gen
+            del loss_flow, loss_pixels, loss_perceptual, loss_gen, v_t, u_t, x_t
+            del loss_g, loss_d
+            del x1, x0, hazy_imgs, clean_imgs, pred_imgs
             del real_output, fake_output, combined_output, combined_input, detached_fake
 
         self.scheduler_G.step()
         self.scheduler_D.step()
 
         # Save results preparing for TensorBoard Logging
-        # result = self.train_metrics.compute()
         result = {}
         for key, metric in self.train_metrics.items():
             val = metric.compute()
@@ -508,8 +516,10 @@ class DehazeTrainer:
             clean_imgs = x1
             hazy_imgs = x0
 
-            padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=16)
-            # print("Padded Image size is: ", padded_hazy.shape)
+            padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=32)
+            if is_main_process():
+                print("Padded Hazy shape: ", padded_hazy.shape)
+
             with torch.autocast(device_type=self.device.type):
                 pred_padded = self.ode_solver.sample(padded_hazy)
 
@@ -601,15 +611,14 @@ class DehazeTrainer:
             self.epoch = epoch
 
             # --- Training ---
-            train_results = self.train_epoch(epoch)
+            # train_results = self.train_epoch(epoch)
 
             dist.barrier()
-
             # --- ADD THIS CLEANUP STEP ---
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
             gc.collect()
+
             # --- Validation ---
             val_results = self.eval_epoch(epoch)
 
@@ -705,7 +714,7 @@ class DehazeTrainer:
             x_t, u_t = path_sampler(x0, x1, t)
 
             # UNet Forward - This creates the huge Activation Graph
-            v_t = self.net_G(x_t, t)
+            v_t = self.net_G(x_t, t, profiler=profiler)
             pred_imgs = x0 + v_t
 
             # Discriminator Forward (on fake)
@@ -792,7 +801,7 @@ if __name__ == "__main__":
 
     # 3. Models
     # Initialize on CPU or specific deviec first
-    net_G = UNet()
+    net_G = UNet(use_checkpoint=True)
     net_D = Discriminator()
     # We will load the train_loader and val_loader inside the stage
     trainer = DehazeTrainer(cfg, net_G, net_D, local_rank)
@@ -852,24 +861,24 @@ if __name__ == "__main__":
         trainer.train_sampler = train_sampler
 
         # 2. Run the training for this stage
-        #        trainer.train_stage(
-        #            stage_index,
-        #            epochs,
-        #            patience,
-        #            checkpoint_dir=cfg.CHECKPOINT_DIR,
-        #            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
-        #        )
-        capture_buffer = io.StringIO()
-        with redirect_stdout(capture_buffer):
-            # We call this just to trigger the print statements.
+        trainer.train_stage(
+            stage_index,
+            epochs,
+            patience,
+            checkpoint_dir=cfg.CHECKPOINT_DIR,
+            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
+        )
+        # capture_buffer = io.StringIO()
+        # with redirect_stdout(capture_buffer):
+        # We call this just to trigger the print statements.
 
-            trainer.debug_memory_usage(resolution=512, batch_size=8)
+        # trainer.debug_memory_usage(resolution=512, batch_size=32)
 
-        avg_debug = capture_buffer.getvalue()
-        if is_main_process():
-            output_debug = "memory_debug.txt"
-            with open(output_debug, "w") as f:
-                f.write(avg_debug)
+        #        avg_debug = capture_buffer.getvalue()
+        #        if is_main_process():
+        #            output_debug = "memory_debug.txt"
+        #            with open(output_debug, "w") as f:
+        #                f.write(avg_debug)
 
         dist.barrier()
 

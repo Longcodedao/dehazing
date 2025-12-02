@@ -130,8 +130,8 @@ class PatchAttentionBlock(nn.Module):
 
 # %%
 device = torch.device("cuda:3")
-x = torch.randn(64, 128, 128, 128).to(device)
-patch_attn = PatchAttentionBlock(dim=128).to(device)
+x = torch.randn(64, 516, 60, 80).to(device)
+patch_attn = PatchAttentionBlock(dim=516).to(device)
 
 out = patch_attn(x)
 print(f"Output Shape is: {out.shape}")

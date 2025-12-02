@@ -80,7 +80,7 @@ _C.SCHEDULE = []
 # -----------------------------------------------------------------------------
 _C.EVAL = CN()
 _C.EVAL.EVAL_INTERVAL = 5
-_C.EVAL.BATCH_SIZE = 64  # Force this to 1 to prevent OOM on high-res images
+_C.EVAL.BATCH_SIZE = 16  # Force this to 1 to prevent OOM on high-res images
 
 
 # -----------------------------------------------------------------------------

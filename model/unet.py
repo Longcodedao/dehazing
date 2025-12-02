@@ -3,6 +3,7 @@ import torch.nn as nn
 import math
 from einops import rearrange
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -59,8 +60,10 @@ class SinusoidalPosEmb(nn.Module):
 
 
 class ResNetBlock(nn.Module):
-    def __init__(self, dim, dim_out, time_emb_dim=None, groups=8):
+    def __init__(self, dim, dim_out, time_emb_dim=None, groups=8, use_checkpoint=False):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
+
         self.time_mlp = (
             nn.Sequential(nn.Linear(time_emb_dim, dim_out), nn.SiLU())
             if time_emb_dim
@@ -78,7 +81,7 @@ class ResNetBlock(nn.Module):
         )
         self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
 
-    def forward(self, x, time_embed=None):
+    def forward_impl(self, x, time_embed=None):
         h = self.block1(x)
         if self.time_mlp is not None and time_embed is not None:
             h = h + self.time_mlp(time_embed)[:, :, None, None]
@@ -87,10 +90,23 @@ class ResNetBlock(nn.Module):
 
         return h + shortcut_h
 
+    def forward(self, x, time_embed=None):
+        if self.training and self.use_checkpoint:
+            # Checkpointing requires inputs to require_grad for backward to work correctly
+            # Often x requires grad, but time_embed might not.
+            return checkpoint.checkpoint(
+                self.forward_impl, x, time_embed, use_reentrant=False
+            )
+        else:
+            return self.forward_impl(x, time_embed)
+
 
 class AttentionBlock(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32, groups=8, patch_size=8):
+    def __init__(
+        self, dim, heads=4, dim_head=32, groups=8, patch_size=8, use_checkpoint=False
+    ):
         super().__init__()
+        self.use_checkpoint = use_checkpoint
         self.scale = dim_head ** (-0.5)
         self.heads = heads
         self.patch_size = patch_size
@@ -139,11 +155,11 @@ class AttentionBlock(nn.Module):
         pad_b = (self.patch_size - h % self.patch_size) % self.patch_size
 
         if pad_r > 0 or pad_b > 0:
-            x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+            x = F.pad(x, (pad_l, pad_r, pad_t, pad_b))
 
         return x, pad_r, pad_b
 
-    def forward(self, x):
+    def forward_impl(self, x):
         b, c, h, w = x.shape
 
         # 1. Multi-Scale
@@ -155,9 +171,9 @@ class AttentionBlock(nn.Module):
         x_merge = torch.concatenate([x1, x2, x3, x4], dim=1)
         x_enhanced = torch.concatenate([x, x_merge], dim=1)
         x_enhanced = self.msc_merge(x_enhanced)
-
         # Apply padding to ensure the H, W is the multiple of self.patch_size
         x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
+
 
         Hp, Wp = x_enhanced.shape[-2:]
         # 2. Patch partition & Platten
@@ -207,6 +223,12 @@ class AttentionBlock(nn.Module):
 
         return out + x
 
+    def forward(self, x):
+        if self.use_checkpoint and self.training:
+            return checkpoint.checkpoint(self.forward_impl, x, use_reentrant=False)
+        else:
+            return self.forward_impl(x)
+
 
 class DownBlock(nn.Module):
     def __init__(
@@ -218,16 +240,31 @@ class DownBlock(nn.Module):
         num_heads=4,
         dim_head=32,
         groups=8,
+        use_checkpoint=False,
     ):
         super().__init__()
         self.res_block1 = ResNetBlock(
-            dim_in, dim_out, time_emb_dim=time_embed_dim, groups=groups
+            dim_in,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
         )
         self.res_block2 = ResNetBlock(
-            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
+            dim_out,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
         )
         self.attn = (
-            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
+            AttentionBlock(
+                dim_out,
+                heads=num_heads,
+                dim_head=dim_head,
+                groups=groups,
+                use_checkpoint=use_checkpoint,
+            )
             if attn
             else nn.Identity()
         )
@@ -256,6 +293,7 @@ class UpBlock(nn.Module):
         num_heads=4,
         dim_head=32,
         groups=8,
+        use_checkpoint=False,
     ):
         super().__init__()
         self.upsample = nn.Upsample(
@@ -264,13 +302,27 @@ class UpBlock(nn.Module):
         self.conv = nn.Conv2d(dim_in, dim_out, kernel_size=3, padding=1)
 
         self.res_block1 = ResNetBlock(
-            dim_out + dim_skip, dim_out, time_emb_dim=time_embed_dim, groups=groups
+            dim_out + dim_skip,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
         )
         self.res_block2 = ResNetBlock(
-            dim_out, dim_out, time_emb_dim=time_embed_dim, groups=groups
+            dim_out,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
         )
         self.attn = (
-            AttentionBlock(dim_out, heads=num_heads, dim_head=dim_head, groups=groups)
+            AttentionBlock(
+                dim_out,
+                heads=num_heads,
+                dim_head=dim_head,
+                groups=groups,
+                use_checkpoint=use_checkpoint,
+            )
             if attn
             else nn.Identity()
         )
@@ -289,7 +341,9 @@ class UpBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, dim=64, channels=3, dim_mults=(1, 2, 4, 8)):
+    def __init__(
+        self, dim=64, channels=3, dim_mults=(1, 2, 4, 8), use_checkpoint=False
+    ):
         super().__init__()
         self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
         self.time_mlp = nn.Sequential(
@@ -307,11 +361,23 @@ class UNet(nn.Module):
         self.ups = nn.ModuleList([])
         for i, (d_in, d_out) in enumerate(in_out):
             use_attn = i >= 2
-            self.downs.append(DownBlock(d_in, d_out, attn=use_attn))
+            self.downs.append(
+                DownBlock(d_in, d_out, attn=use_attn, use_checkpoint=use_checkpoint)
+            )
 
-        self.mid_block1 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
-        self.mid_attn = AttentionBlock(list_dims[-1])
-        self.mid_block2 = ResNetBlock(list_dims[-1], list_dims[-1], time_emb_dim=256)
+        self.mid_block1 = ResNetBlock(
+            list_dims[-1],
+            list_dims[-1],
+            time_emb_dim=256,
+            use_checkpoint=use_checkpoint,
+        )
+        self.mid_attn = AttentionBlock(list_dims[-1], use_checkpoint=use_checkpoint)
+        self.mid_block2 = ResNetBlock(
+            list_dims[-1],
+            list_dims[-1],
+            time_emb_dim=256,
+            use_checkpoint=use_checkpoint,
+        )
 
         reversed_dim = list(reversed(list_dims))
         up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
@@ -319,13 +385,22 @@ class UNet(nn.Module):
 
         for i, (d_in, d_out) in enumerate(up_in_out):
             use_attn = i < 2
-            self.ups.append(UpBlock(d_in, dim_skip[i], d_out, attn=use_attn))
+            self.ups.append(
+                UpBlock(
+                    d_in,
+                    dim_skip[i],
+                    d_out,
+                    attn=use_attn,
+                    use_checkpoint=use_checkpoint,
+                )
+            )
 
         self.final_conv = nn.Sequential(
-            ResNetBlock(dim, dim), nn.Conv2d(dim, channels, kernel_size=1)
+            ResNetBlock(dim, dim, use_checkpoint=use_checkpoint),
+            nn.Conv2d(dim, channels, kernel_size=1),
         )
 
-    def forward(self, x, t):
+    def forward(self, x, t, profiler=None):
         """
         Args:
         x: input of the haze image
@@ -333,26 +408,35 @@ class UNet(nn.Module):
 
         Returns: out: Clean image
         """
+        if profiler:
+            profiler.print_status("  [UNet] Start")
+
         t_emb = self.time_mlp(t)
         x = self.init_conv(x)
+        if profiler:
+            profiler.print_status("  [UNet] Init Conv")
 
         skips = []
-        for down in self.downs:
+        for i, down in enumerate(self.downs):
             skips.append(x)
             x = down(x, t_emb)
+            if profiler:
+                profiler.print_status(f"  [UNet] Down {i}")
 
         x = self.mid_block1(x, t_emb)
         x = self.mid_attn(x)
         x = self.mid_block2(x, t_emb)
+        if profiler:
+            profiler.print_status("  [UNet] Mid Block")
 
         for up in self.ups:
             skip = skips.pop()
-            #            print("Skip shape: ", skip.shape)
-            #            print("x shape: ", x.shape)
-            #            print("Time embed shape: ", t_emb.shape)
-
             x = up(x, t_emb, skip)
+            if profiler:
+                profiler.print_status(f"  [UNet] Up {i}")
             # print("-------------")
 
         out = self.final_conv(x)
+        if profiler:
+            profiler.print_status("  [UNet] End")
         return out

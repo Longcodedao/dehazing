@@ -1,0 +1,122 @@
+
+==================== STARTING MEMORY DEBUG 512x512 BS=8 ====================
+
+[MEM] --- Start (Empty Cache) ---
+   Active Used: 0.99 GB (Delta: +0.99 GB)
+   Cache/Resrv: 1.44 GB
+   Peak So Far: 0.99 GB
+
+[MEM] --- After Models Loaded ---
+   Active Used: 0.99 GB (Delta: +0.00 GB)
+   Cache/Resrv: 1.44 GB
+   Peak So Far: 0.99 GB
+[INFO] Generator Theoretical Size: 486.52 MB
+[INFO] Discriminator Theoretical Size: 2.53 MB
+[INFO] VGG Loss Theoretical Size: 29.13 MB
+
+[STEP] Creating Dummy Batch...
+
+[MEM] --- Input Batch Loaded ---
+   Active Used: 1.03 GB (Delta: +0.05 GB)
+   Cache/Resrv: 1.44 GB
+   Peak So Far: 1.03 GB
+
+[STEP] Generator Forward Pass...
+
+[MEM] ---   [UNet] Start ---
+   Active Used: 1.08 GB (Delta: +0.05 GB)
+   Cache/Resrv: 1.44 GB
+   Peak So Far: 1.10 GB
+
+[MEM] ---   [UNet] Init Conv ---
+   Active Used: 1.35 GB (Delta: +0.27 GB)
+   Cache/Resrv: 1.69 GB
+   Peak So Far: 1.35 GB
+
+[MEM] ---   [UNet] Down 0 ---
+   Active Used: 2.16 GB (Delta: +0.81 GB)
+   Cache/Resrv: 4.45 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Down 1 ---
+   Active Used: 2.57 GB (Delta: +0.41 GB)
+   Cache/Resrv: 4.45 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Down 2 ---
+   Active Used: 2.92 GB (Delta: +0.35 GB)
+   Cache/Resrv: 4.46 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Down 3 ---
+   Active Used: 3.18 GB (Delta: +0.26 GB)
+   Cache/Resrv: 4.46 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Mid Block ---
+   Active Used: 3.31 GB (Delta: +0.13 GB)
+   Cache/Resrv: 4.46 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Up 3 ---
+   Active Used: 3.48 GB (Delta: +0.17 GB)
+   Cache/Resrv: 4.46 GB
+   Peak So Far: 3.60 GB
+
+[MEM] ---   [UNet] Up 3 ---
+   Active Used: 3.77 GB (Delta: +0.29 GB)
+   Cache/Resrv: 4.46 GB
+   Peak So Far: 4.01 GB
+
+[MEM] ---   [UNet] Up 3 ---
+   Active Used: 4.21 GB (Delta: +0.44 GB)
+   Cache/Resrv: 4.91 GB
+   Peak So Far: 4.58 GB
+
+[MEM] ---   [UNet] Up 3 ---
+   Active Used: 5.83 GB (Delta: +1.63 GB)
+   Cache/Resrv: 8.66 GB
+   Peak So Far: 7.21 GB
+
+[MEM] ---   [UNet] End ---
+   Active Used: 6.09 GB (Delta: +0.26 GB)
+   Cache/Resrv: 9.16 GB
+   Peak So Far: 7.58 GB
+
+[MEM] --- After G Forward (Activations Stored) ---
+   Active Used: 10.06 GB (Delta: +3.97 GB)
+   Cache/Resrv: 11.37 GB
+   Peak So Far: 11.17 GB
+
+[STEP] Generator Backward Pass...
+
+[MEM] --- After G Backward (Gradients calculated) ---
+   Active Used: 1.66 GB (Delta: -8.41 GB)
+   Cache/Resrv: 12.63 GB
+   Peak So Far: 11.17 GB
+
+[STEP] Generator Optimizer Step...
+
+[MEM] --- After G Optimizer (Adam States Created) ---
+   Active Used: 1.18 GB (Delta: -0.48 GB)
+   Cache/Resrv: 12.63 GB
+   Peak So Far: 11.17 GB
+
+[STEP] Discriminator Loop...
+
+[MEM] --- After D Forward ---
+   Active Used: 1.68 GB (Delta: +0.50 GB)
+   Cache/Resrv: 12.63 GB
+   Peak So Far: 11.17 GB
+
+[MEM] --- After D Backward ---
+   Active Used: 1.12 GB (Delta: -0.55 GB)
+   Cache/Resrv: 12.63 GB
+   Peak So Far: 11.17 GB
+
+[MEM] --- After D Optimizer ---
+   Active Used: 1.13 GB (Delta: +0.00 GB)
+   Cache/Resrv: 12.63 GB
+   Peak So Far: 11.17 GB
+
+==================== DEBUG COMPLETE ====================

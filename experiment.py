@@ -1,139 +1,163 @@
 # %%
+from data.utils import get_haze_transforms, restandardize_tensor
+from model.unet import UNet
 import torch
-import torch.nn as nn
-from einops import rearrange
-import torch.nn.functional as F
+from pathlib import Path
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from PIL import Image
+import pandas as pd
+from tqdm.notebook import tqdm
+from model.flow_matching import ODESolver
+
+
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics import MeanMetric, MetricCollection
+
+from utils import pad_to_multiple, unpad
 
 
 # %%
+# Getting the SOTS dataset
+class RESIDE_SOTS_Indoor(Dataset):
+    def __init__(self, dataset_path, transform=None, metadata="metadata.csv"):
+        self.root_dir = Path(dataset_path)
+        self.metadata_csv = pd.read_csv(self.root_dir / metadata)
+
+        self.transform = transform
+        self.data = []
+        for idx, row in self.metadata_csv.iterrows():
+            clean_path = self.root_dir / "indoor" / row["clear_image_path"]
+            hazy_paths_str = row["hazy_image_paths"]
+            hazy_image_paths = [
+                path.strip()
+                for path in hazy_paths_str.strip("[]").replace("'", "").split(",")
+            ]
+            list_hazy_paths = [
+                self.root_dir / "indoor" / hazy_path for hazy_path in hazy_image_paths
+            ]
+            for hazy_path in list_hazy_paths:
+                data_item = {"index": idx, "clean": clean_path, "hazy": hazy_path}
+
+                self.data.append(data_item)
+
+    def __repr__(self):
+        return "RESIDE Indoor"
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        data_item = self.data[idx]
+        clean_path = data_item["clean"]
+        hazy_path = data_item["hazy"]
+
+        try:
+            clean_img = Image.open(clean_path).convert("RGB")
+            hazy_img = Image.open(hazy_path).convert("RGB")
+        except FileNotFoundError:
+            print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
+            return self.__getitem__((idx + 1) % len(self))
+
+        if self.transform:
+            clean_img, hazy_img = self.transform(clean_img, hazy_img)
+        else:
+            clean_img = (
+                torch.as_tensor(np.array(clean_img)).permute(2, 0, 1).float() / 255.0
+            )
+            hazy_img = (
+                torch.as_tensor(np.array(hazy_img)).permute(2, 0, 1).float() / 255.0
+            )
+
+        return clean_img, hazy_img
 
 
-class PatchAttentionBlock(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32, groups=8, patch_size=8):
-        super().__init__()
-        self.scale = dim_head ** (-0.5)
-        self.heads = heads
-        self.patch_size = patch_size
-        hidden_dim = heads * dim_head
+val_sots = get_haze_transforms(
+    dataset_name="RESIDE_SOTS_Indoor", split="val", verbose=True
+)
+sots_indoor = RESIDE_SOTS_Indoor(
+    dataset_path="dataset/reside-sots/",
+    transform=val_sots,
+    metadata="metadata_indoor.csv",
+)
 
-        # Add Multi-Scale Context
-        # We are going to diversify the context field by embedding
-        # multi convolution with different dilations
-        internal_dim = dim // 4
-        self.msc_conv1 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=1, dilation=1
-        )
-        self.msc_conv2 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=2, dilation=2
-        )
-        self.msc_conv3 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=4, dilation=4
-        )
-        self.msc_conv4 = nn.Conv2d(
-            dim, dim - (3 * internal_dim), kernel_size=3, padding=1, dilation=1
-        )
-        self.msc_merge = nn.Sequential(
-            nn.Conv2d(dim * 2, dim, kernel_size=1), nn.GroupNorm(groups, dim), nn.SiLU()
-        )
-
-        # --- Patch Embedding Projections
-        # Fllatened Patch Dimension = C * P * P
-        patch_dim = dim * patch_size * patch_size
-
-        # Project patch -> Embedding (dim)
-        self.patch_to_emb = nn.Linear(patch_dim, dim)
-
-        # Project Embedding -> Patch
-        self.emb_to_patch = nn.Linear(dim, patch_dim)
-
-        # --- Global Attention Projection ---
-        self.to_qkv = nn.Linear(dim, hidden_dim * 3, bias=False)
-        self.to_out = nn.Linear(hidden_dim, dim)
-
-    def paddding(self, x):
-        """Ensure (H, W) of the image x are divisible by patch_size"""
-        h, w = x.shape[-2:]
-
-        pad_l = pad_t = 0
-        pad_r = (self.patch_size - w % self.patch_size) % self.patch_size
-        pad_b = (self.patch_size - h % self.patch_size) % self.patch_size
-
-        if pad_r > 0 or pad_b > 0:
-            x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
-
-        return x, pad_r, pad_b
-
-    def forward(self, x):
-        b, c, h, w = x.shape
-
-        # 1. Multi-Scale
-        x1 = self.msc_conv1(x)
-        x2 = self.msc_conv2(x)
-        x3 = self.msc_conv3(x)
-        x4 = self.msc_conv4(x)
-
-        x_merge = torch.concatenate([x1, x2, x3, x4], dim=1)
-        x_enhanced = torch.concatenate([x, x_merge], dim=1)
-        x_enhanced = self.msc_merge(x_enhanced)
-
-        # Apply padding to ensure the H, W is the multiple of self.patch_size
-        x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
-
-        Hp, Wp = x_enhanced.shape[-2:]
-        # 2. Patch partition & Platten
-        # (B, C, H, W) -> (B, Num_Patches, Patch_Dim)
-        # Patch_Dim = C * P * P
-        x_patches = rearrange(
-            x_enhanced,
-            "b c (h p1) (w p2) -> b (h w) (c p1 p2)",
-            p1=self.patch_size,
-            p2=self.patch_size,
-        )
-        # 3. Patch Embedding (Projection to 'dim')
-        # (B, N, C * P * P) -> (B, N, C)
-        x_emb = self.patch_to_emb(x_patches)
-        # 4. Global Attention on Patches
-        qkv = self.to_qkv(x_emb).chunk(3, dim=-1)
-
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv)
-
-        q = q * self.scale
-        attention = torch.einsum("b h i d, b h j d -> b h i j", q, k)
-
-        attention = attention.softmax(dim=-1)
-        out = torch.einsum("b h i j, b h j d -> b h i d", attention, v)
-
-        # Merge head
-        out = rearrange(out, "b h n d -> b n (h d)")
-
-        # 5. Output Projection & Un-Embedding
-        out = self.to_out(out)
-        out = self.emb_to_patch(out)
-
-        # 6. Un-Patchify (Reshape back to image)
-        # (B, H/P * W/P, C*P*P) -> (B, C, H, W)
-        out = rearrange(
-            out,
-            "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
-            h=Hp // self.patch_size,
-            w=Wp // self.patch_size,
-            p1=self.patch_size,
-            p2=self.patch_size,
-        )
-
-        # 7. Remove padding
-        if pad_r > 0 or pad_b > 0:
-            out = out[:, :, :h, :w]
-
-        return out + x
-
+val_loader = DataLoader(
+    sots_indoor, batch_size=8, shuffle=False, pin_memory=True, num_workers=4
+)
 
 # %%
 device = torch.device("cuda:3")
-x = torch.randn(64, 516, 60, 80).to(device)
-patch_attn = PatchAttentionBlock(dim=516).to(device)
+eval_metrics = MetricCollection(
+    {
+        "psnr": MeanMetric().to(device),
+        "ssim": MeanMetric().to(device),
+    }
+)
+psnr_eval = PeakSignalNoiseRatio(data_range=1.0, reduction="none").to(device)
+ssim_eval = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
 
-out = patch_attn(x)
-print(f"Output Shape is: {out.shape}")
+
+model = UNet().to(device)
+ode_solver = ODESolver(model, nfe=20)
+model_path = "checkpoints/flow_matching_v1_stage2/best/chkpoint_best_s3.pt"
+checkpoint = torch.load(model_path, map_location=device)
+state_dict = checkpoint["G_state_dict"]
+new_state_dict = {}
+
+# Iterate over all keys and remove the 'module.' prefix
+for key, value in state_dict.items():
+    # Only remove 'module.' prefix if it exists
+    if key.startswith("module."):
+        new_key = key[7:]  # Slicing from index 7 removes 'module.'
+    else:
+        new_key = key
+    new_state_dict[new_key] = value
+
+model = model.load_state_dict(new_state_dict, strict=False)
+
+
+# %%
+## Try to load the dataloader
+
+pbar = tqdm(val_loader, "Evaluating", leave=True)
+with torch.no_grad():
+    for idx, batch in enumerate(pbar):
+        x1, x0 = batch
+        x1 = x1.to(device)
+        x0 = x0.to(device)
+
+        clean_imgs = x1
+        hazy_imgs = x0
+
+        padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=32)
+
+        with torch.autocast(device_type=device.type):
+            pred_padded = ode_solver.sample(padded_hazy)
+
+        pred_imgs = unpad(pred_padded, pad_h, pad_w)
+        pred_original = restandardize_tensor(pred_imgs)
+        target_original = restandardize_tensor(clean_imgs)
+
+        eval_metrics["psnr"].update(
+            psnr_eval(pred_original.detach(), target_original.detach())
+        )
+        eval_metrics["ssim"].update(
+            ssim_eval(pred_original.detach(), target_original.detach())
+        )
+
+        psnr_value = eval_metrics["psnr"].compute()
+        ssim_value = eval_metrics["ssim"].compute()
+
+        pbar.set_postfix(
+            {
+                "PSNR": f"{psnr_value:.4f}",
+                "SSIM": f"{ssim_value:.4f}",
+            }
+        )
+# Compute the local Results
+local_psnr = eval_metrics["psnr"].compute()
+local_ssim = eval_metrics["ssim"].compute()
+
+print(f"PSNR: {local_psnr:.2f}\tSSIM: {local_ssim:.2f}")
 
 # %%

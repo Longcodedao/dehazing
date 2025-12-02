@@ -254,7 +254,9 @@ class DehazeTrainer:
                 "L_perceptual": MeanMetric().to(self.device),
             }
         )
-        self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0, reduction="none").to(
+            self.device
+        )
         self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
 
         self.eval_metrics = MetricCollection(
@@ -342,7 +344,7 @@ class DehazeTrainer:
             self.scheduler_D.load_state_dict(checkpoint["scheduler_D_state_dict"])
 
         # 4. Load Epoch (Default to 0 if missing)
-        self.epoch = checkpoint.get("epoch", 1)
+        self.epoch = checkpoint.get("epoch", 0) + 1
         self.stage_index = checkpoint.get("stage_index", 1)
         print(f"[+] Resuming from Epoch {self.epoch}")
 
@@ -517,8 +519,6 @@ class DehazeTrainer:
             hazy_imgs = x0
 
             padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=32)
-            if is_main_process():
-                print("Padded Hazy shape: ", padded_hazy.shape)
 
             with torch.autocast(device_type=self.device.type):
                 pred_padded = self.ode_solver.sample(padded_hazy)
@@ -563,7 +563,13 @@ class DehazeTrainer:
         return result
 
     def train_stage(
-        self, stage_index, total_epochs, patience, checkpoint_dir, checkpoint_interval=1
+        self,
+        stage_index,
+        total_epochs,
+        patience,
+        checkpoint_dir,
+        checkpoint_interval=1,
+        eval_interval=5,
     ):
         """Runs the complete training cycle for a single stage (resolution)."""
         self.stage_index = stage_index
@@ -611,7 +617,7 @@ class DehazeTrainer:
             self.epoch = epoch
 
             # --- Training ---
-            # train_results = self.train_epoch(epoch)
+            train_results = self.train_epoch(epoch)
 
             dist.barrier()
             # --- ADD THIS CLEANUP STEP ---
@@ -619,41 +625,44 @@ class DehazeTrainer:
                 torch.cuda.empty_cache()
             gc.collect()
 
-            # --- Validation ---
-            val_results = self.eval_epoch(epoch)
-
             if is_main_process():
                 print(f"Stage {stage_index} Epoch {epoch} Results:")
                 print(
                     f"  Train: L_G={train_results['L_gen']:.4f}, L_D={train_results['L_dis']:.4f}"
                 )
-                print(
-                    f"  Eval: PSNR={val_results['psnr']:.4f}, SSIM={val_results['ssim']:.4f}"
+
+            if epoch % eval_interval == 0:
+                # --- Validation ---
+                val_results = self.eval_epoch(epoch)
+
+                if is_main_process():
+                    print(
+                        f"  Eval: PSNR={val_results['psnr']:.4f}, SSIM={val_results['ssim']:.4f}"
+                    )
+
+                # Use PSNR as the metric to track improvement
+                current_metric = val_results["psnr"].item()
+
+                # --- Checkpointing and Early Stopping ---
+                if is_main_process():
+                    if current_metric > best_metric:
+                        best_metric = current_metric
+                        epochs_no_improve = 0
+
+                        # Save the BEST checkpoint
+                        best_checkpoint_dir = os.path.join(
+                            best_checkpoint_path, f"chkpoint_best_s{stage_index}.pt"
+                        )
+                        self.save_checkpoints(best_checkpoint_dir)
+                    else:
+                        epochs_no_improve += 1
+
+            # Save the latest checkpoint
+            if epoch % checkpoint_interval == 0:
+                latest_checkpoint_dir = os.path.join(
+                    latest_checkpoint_path, f"chkpoint_e{epoch}_s{stage_index}.pt"
                 )
-
-            # Use PSNR as the metric to track improvement
-            current_metric = val_results["psnr"].item()
-
-            # --- Checkpointing and Early Stopping ---
-            if is_main_process():
-                if current_metric > best_metric:
-                    best_metric = current_metric
-                    epochs_no_improve = 0
-
-                    # Save the BEST checkpoint
-                    best_checkpoint_dir = os.path.join(
-                        best_checkpoint_path, f"chkpoint_best_s{stage_index}.pt"
-                    )
-                    self.save_checkpoints(best_checkpoint_dir)
-                else:
-                    epochs_no_improve += 1
-
-                # Save the latest checkpoint
-                if epoch % checkpoint_interval == 0:
-                    latest_checkpoint_dir = os.path.join(
-                        latest_checkpoint_path, f"chkpoint_e{epoch}_s{stage_index}.pt"
-                    )
-                    self.save_checkpoints(latest_checkpoint_dir)
+                self.save_checkpoints(latest_checkpoint_dir)
 
             stop_signal = torch.tensor(1 if epochs_no_improve >= patience else 0).to(
                 self.device
@@ -824,6 +833,7 @@ if __name__ == "__main__":
         batch_size = stage.BATCH_SIZE
         epochs = stage.EPOCHS
         patience = stage.PATIENCE
+        eval_interval = stage.EVAL_INTERVAL
 
         if is_main_process():
             print("\n==============================================")
@@ -867,6 +877,7 @@ if __name__ == "__main__":
             patience,
             checkpoint_dir=cfg.CHECKPOINT_DIR,
             checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
+            eval_interval=eval_interval,
         )
         # capture_buffer = io.StringIO()
         # with redirect_stdout(capture_buffer):

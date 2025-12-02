@@ -78,10 +78,19 @@ mkdir -p "$ROOT_DATASET"
 FOLDER_NAME="indoor-training-set"
 TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "Downloading: Indoor Training Set (ITS)..."
+echo "Downloading: RESIDE STANDARD Indoor Training Set (ITS)..."
 mkdir -p "$TARGET_PATH"
 kaggle datasets download -d balraj98/indoor-training-set-its-residestandard \
       --unzip -p "$TARGET_PATH"
+
+FOLDER_NAME="reside-sots"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+
+echo "Downloading: RESIDE STANDARD SOTS ..."
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d balraj98/synthetic-objective-testing-set-sots-reside\
+      --unzip -p "$TARGET_PATH"
+
 
 # ---
 

@@ -2,10 +2,10 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from data.utils import get_haze_transforms, partition_dataset
-from data import RESIDE_Indoor, Haze4k_Dataset
+from data.utils import get_haze_transforms
+from data import RESIDE_Indoor, RESIDE_SOTS_Indoor
 from yacs.config import CfgNode as CN
 import os
 
@@ -38,6 +38,7 @@ def set_seed(seed):
 
 
 def get_loaders_for_stage(cfg, resolution, batch_size, verbose=False):
+    ## Training RESIDE Indoor
     data_cfg = cfg.DATA
 
     train_transform_reside = get_haze_transforms(
@@ -53,36 +54,15 @@ def get_loaders_for_stage(cfg, resolution, batch_size, verbose=False):
         split="val",
         verbose=verbose,
     )
-    reside_dataset = RESIDE_Indoor(
+    train_dataset = RESIDE_Indoor(
         dataset_path=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        transform=None,
+        transform=train_transform_reside,
     )
-    train_reside_dataset, val_reside_dataset = partition_dataset(
-        reside_dataset,
-        train_transform_reside,
-        val_transform_reside,
-        train_ratio=data_cfg.TRAIN_RATIO,
+    val_dataset = RESIDE_SOTS_Indoor(
+        dataset_path="dataset/reside-sots/",
+        transform=val_transform_reside,
+        metadata="metadata_indoor.csv",
     )
-
-    # Loading the Haze4k Dataset
-    train_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resolution, split="train", verbose=verbose
-    )
-    val_transform_haze4k = get_haze_transforms(
-        dataset_name="HAZE4K", resize_size=resolution, split="val", verbose=verbose
-    )
-    haze_4k_train = Haze4k_Dataset(
-        root_dir=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        split="train",
-        transform=train_transform_haze4k,
-    )
-    haze_4k_val = Haze4k_Dataset(
-        root_dir=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
-        split="val",
-        transform=val_transform_haze4k,
-    )
-    train_dataset = ConcatDataset([train_reside_dataset, haze_4k_train])
-    val_dataset = ConcatDataset([val_reside_dataset, haze_4k_val])
 
     train_sampler = DistributedSampler(train_dataset, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, shuffle=True)
@@ -100,7 +80,7 @@ def get_loaders_for_stage(cfg, resolution, batch_size, verbose=False):
         batch_size=cfg.EVAL.BATCH_SIZE,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=8,
+        num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,
     )
 

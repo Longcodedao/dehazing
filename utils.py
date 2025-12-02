@@ -99,8 +99,48 @@ def get_loaders_for_stage(cfg, resolution, batch_size, verbose=False):
         batch_size=cfg.EVAL.BATCH_SIZE,
         shuffle=False,
         sampler=val_sampler,
-        num_workers=cfg.NUM_WORKERS,
+        num_workers=8,
         pin_memory=cfg.PIN_MEMORY,
     )
 
     return train_loader, val_loader, train_sampler
+
+
+# Toggle the gradients
+def toggle_grad(model, requires_grad):
+    for p in model.parameters():
+        p.requires_grad = requires_grad
+
+
+## Pad the images for evaluation
+def pad_to_multiple(image_tensor, multiple=16):
+    """
+    Pads the height (H) and width (W) of the image_tensor (B, C, H, W)
+    to be a multiple of the specified factor.
+    """
+    b, c, h, w = image_tensor.shape
+
+    # Calculate required padded dimensions
+    pad_h = (multiple - (h % multiple)) % multiple
+    pad_w = (multiple - (w % multiple)) % multiple
+
+    # Apply padding only to the bottom and right
+    # (padding_left, padding_right, padding_top, padding_bottom)
+    padded_tensor = F.pad(image_tensor, (0, pad_w, 0, pad_h), mode="reflect")
+
+    return padded_tensor, pad_h, pad_w
+
+
+## Unpad the image
+def unpad(padded_tensor, pad_h, pad_w):
+    """
+    Crops the padded tensor back to the original size.
+    """
+    if pad_h == 0 and pad_w == 0:
+        return padded_tensor
+
+    h_padded = padded_tensor.shape[2]
+    w_padded = padded_tensor.shape[3]
+
+    # Crop from (0, 0) up to (h_padded - pad_h, w_padded - pad_w)
+    return padded_tensor[:, :, : h_padded - pad_h, : w_padded - pad_w]

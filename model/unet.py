@@ -2,19 +2,7 @@ import torch
 import torch.nn as nn
 import math
 from einops import rearrange
-
-
-def convert_to_embedding(x, n_heads):
-    """
-    Args
-    x is a Tensor has shape (b, n_heads * c, h, w)
-
-    Returns:
-    out: Tensor with shape (b, n_heads, h * w, c)
-    """
-    b, _, h, w = x.shape
-    out = rearrange(x, "b (n_heads c) h w -> b n_heads (h w) c", n_heads=n_heads)
-    return out
+import torch.nn.functional as F
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -101,10 +89,11 @@ class ResNetBlock(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, dim, heads=4, dim_head=32, groups=8):
+    def __init__(self, dim, heads=4, dim_head=32, groups=8, patch_size=8):
         super().__init__()
         self.scale = dim_head ** (-0.5)
         self.heads = heads
+        self.patch_size = patch_size
         hidden_dim = heads * dim_head
 
         # Add Multi-Scale Context
@@ -127,14 +116,37 @@ class AttentionBlock(nn.Module):
             nn.Conv2d(dim * 2, dim, kernel_size=1), nn.GroupNorm(groups, dim), nn.SiLU()
         )
 
-        # Input the Attention Mechanism
-        self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, kernel_size=1, bias=False)
-        self.to_out = nn.Conv2d(hidden_dim, dim, kernel_size=1)
+        # --- Patch Embedding Projections
+        # Fllatened Patch Dimension = C * P * P
+        patch_dim = dim * patch_size * patch_size
+
+        # Project patch -> Embedding (dim)
+        self.patch_to_emb = nn.Linear(patch_dim, dim)
+
+        # Project Embedding -> Patch
+        self.emb_to_patch = nn.Linear(dim, patch_dim)
+
+        # --- Global Attention Projection ---
+        self.to_qkv = nn.Linear(dim, hidden_dim * 3, bias=False)
+        self.to_out = nn.Linear(hidden_dim, dim)
+
+    def paddding(self, x):
+        """Ensure (H, W) of the image x are divisible by patch_size"""
+        h, w = x.shape[-2:]
+
+        pad_l = pad_t = 0
+        pad_r = (self.patch_size - w % self.patch_size) % self.patch_size
+        pad_b = (self.patch_size - h % self.patch_size) % self.patch_size
+
+        if pad_r > 0 or pad_b > 0:
+            x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
+
+        return x, pad_r, pad_b
 
     def forward(self, x):
         b, c, h, w = x.shape
 
-        # Multi-Scale context step
+        # 1. Multi-Scale
         x1 = self.msc_conv1(x)
         x2 = self.msc_conv2(x)
         x3 = self.msc_conv3(x)
@@ -144,18 +156,56 @@ class AttentionBlock(nn.Module):
         x_enhanced = torch.concatenate([x, x_merge], dim=1)
         x_enhanced = self.msc_merge(x_enhanced)
 
-        q, k, v = self.to_qkv(x_enhanced).chunk(3, dim=1)
-        q = convert_to_embedding(q, self.heads)
-        k = convert_to_embedding(k, self.heads)
-        v = convert_to_embedding(v, self.heads)
+        # Apply padding to ensure the H, W is the multiple of self.patch_size
+        x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
+
+        Hp, Wp = x_enhanced.shape[-2:]
+        # 2. Patch partition & Platten
+        # (B, C, H, W) -> (B, Num_Patches, Patch_Dim)
+        # Patch_Dim = C * P * P
+        x_patches = rearrange(
+            x_enhanced,
+            "b c (h p1) (w p2) -> b (h w) (c p1 p2)",
+            p1=self.patch_size,
+            p2=self.patch_size,
+        )
+        # 3. Patch Embedding (Projection to 'dim')
+        # (B, N, C * P * P) -> (B, N, C)
+        x_emb = self.patch_to_emb(x_patches)
+        # 4. Global Attention on Patches
+        qkv = self.to_qkv(x_emb).chunk(3, dim=-1)
+
+        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv)
 
         q = q * self.scale
         attention = torch.einsum("b h i d, b h j d -> b h i j", q, k)
+
         attention = attention.softmax(dim=-1)
         out = torch.einsum("b h i j, b h j d -> b h i d", attention, v)
-        out = out.permute(0, 1, 3, 2).reshape(b, -1, h, w)
 
-        return self.to_out(out) + x
+        # Merge head
+        out = rearrange(out, "b h n d -> b n (h d)")
+
+        # 5. Output Projection & Un-Embedding
+        out = self.to_out(out)
+        out = self.emb_to_patch(out)
+
+        # 6. Un-Patchify (Reshape back to image)
+        # (B, H/P * W/P, C*P*P) -> (B, C, H, W)
+        out = rearrange(
+            out,
+            "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
+            h=Hp // self.patch_size,
+            w=Wp // self.patch_size,
+            p1=self.patch_size,
+            p2=self.patch_size,
+        )
+
+        # 7. Remove padding
+        if pad_r > 0 or pad_b > 0:
+            out = out[:, :, :h, :w]
+
+        return out + x
 
 
 class DownBlock(nn.Module):
@@ -306,4 +356,3 @@ class UNet(nn.Module):
 
         out = self.final_conv(x)
         return out
-

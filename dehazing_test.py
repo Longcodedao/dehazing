@@ -31,10 +31,18 @@ from config import get_cfg_defaults
 
 import os
 import argparse
-from utils import convert_cfg_to_dict, set_seed, get_loaders_for_stage
+from utils import (
+    convert_cfg_to_dict,
+    set_seed,
+    get_loaders_for_stage,
+    toggle_grad,
+    pad_to_multiple,
+    unpad,
+)
 import io
 from contextlib import redirect_stdout
 import yaml
+import gc
 
 
 # %%
@@ -192,44 +200,48 @@ def setup_config(args):
 
 
 # %%
-## Helper (Toggle Gradients)
-def toggle_grad(model, requires_grad):
-    for p in model.parameters():
-        p.requires_grad = requires_grad
+class MemoryProfiler:
+    def __init__(self, device):
+        self.device = device
+        self.last_allocated = 0
+        self.last_reserved = 0
 
+        # Reset peak stats at start
+        torch.cuda.reset_peak_memory_stats(device)
 
-## Pad the images for evaluation
-def pad_to_multiple(image_tensor, multiple=16):
-    """
-    Pads the height (H) and width (W) of the image_tensor (B, C, H, W)
-    to be a multiple of the specified factor.
-    """
-    b, c, h, w = image_tensor.shape
+    def _to_gb(self, bytes_val):
+        return bytes_val / 1024**3
 
-    # Calculate required padded dimensions
-    pad_h = (multiple - (h % multiple)) % multiple
-    pad_w = (multiple - (w % multiple)) % multiple
+    def print_status(self, tag=""):
+        # Force sync to get accurate reading
+        torch.cuda.synchronize(self.device)
 
-    # Apply padding only to the bottom and right
-    # (padding_left, padding_right, padding_top, padding_bottom)
-    padded_tensor = F.pad(image_tensor, (0, pad_w, 0, pad_h), mode="reflect")
+        allocated = torch.cuda.memory_allocated(self.device)
+        reserved = torch.cuda.memory_reserved(self.device)
+        max_allocated = torch.cuda.max_memory_allocated(self.device)
 
-    return padded_tensor, pad_h, pad_w
+        delta_alloc = allocated - self.last_allocated
 
+        print(f"\n[MEM] --- {tag} ---")
+        print(
+            f"   Active Used: {self._to_gb(allocated):.2f} GB (Delta: {self._to_gb(delta_alloc):+.2f} GB)"
+        )
+        print(f"   Cache/Resrv: {self._to_gb(reserved):.2f} GB")
+        print(f"   Peak So Far: {self._to_gb(max_allocated):.2f} GB")
 
-## Unpad the image
-def unpad(padded_tensor, pad_h, pad_w):
-    """
-    Crops the padded tensor back to the original size.
-    """
-    if pad_h == 0 and pad_w == 0:
-        return padded_tensor
+        self.last_allocated = allocated
+        self.last_reserved = reserved
 
-    h_padded = padded_tensor.shape[2]
-    w_padded = padded_tensor.shape[3]
+    def inspect_model(self, model, name="Model"):
+        param_size = 0
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        buffer_size = 0
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
 
-    # Crop from (0, 0) up to (h_padded - pad_h, w_padded - pad_w)
-    return padded_tensor[:, :, : h_padded - pad_h, : w_padded - pad_w]
+        total_size_mb = (param_size + buffer_size) / 1024**2
+        print(f"[INFO] {name} Theoretical Size: {total_size_mb:.2f} MB")
 
 
 # %%
@@ -504,6 +516,10 @@ class DehazeTrainer:
                     {"L_G": f"{loss_g.item():.4f}", "L_D": f"{loss_d.item():.4f}"}
                 )
 
+            del x1, x0, hazy_imgs, clean_imgs, x_t, u_t, v_t, pred_imgs
+            del loss_g, loss_d, loss_flow, loss_pixels, loss_perceptual, loss_gen
+            del real_output, fake_output, combined_output, combined_input, detached_fake
+
         self.scheduler_G.step()
         self.scheduler_D.step()
 
@@ -518,10 +534,10 @@ class DehazeTrainer:
         if is_main_process():
             # TensorBoard Logging for Training Losses
             self.writer.add_scalar(
-                f"Loss/Stage_{self.stage_index}/G_Total", loss_g.item(), epoch
+                f"Loss/Stage_{self.stage_index}/G_Total", result["L_gen"].item(), epoch
             )
             self.writer.add_scalar(
-                f"Loss/Stage_{self.stage_index}/D_Total", loss_d.item(), epoch
+                f"Loss/Stage_{self.stage_index}/D_Total", result["L_dis"].item(), epoch
             )
             self.writer.add_scalar(
                 f"Loss/Stage_{self.stage_index}/Flow_Epoch",
@@ -560,7 +576,7 @@ class DehazeTrainer:
             hazy_imgs = x0
 
             padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=16)
-            print("Padded Image size is: ", padded_hazy.shape)
+            # print("Padded Image size is: ", padded_hazy.shape)
             with torch.autocast(device_type=self.device.type):
                 pred_padded = self.ode_solver.sample(padded_hazy)
 
@@ -632,7 +648,7 @@ class DehazeTrainer:
                 )
                 latest_path = os.path.join(latest_checkpoint_path, latest_file)
 
-                self.load_checkpoints(self, latest_path)
+                self.load_checkpoints(latest_path)
 
         if is_main_process():
             print(
@@ -649,9 +665,18 @@ class DehazeTrainer:
             )
 
         for epoch in range(self.epoch, total_epochs + 1):
+            self.epoch = epoch
+
             # --- Training ---
             train_results = self.train_epoch(epoch)
 
+            dist.barrier()
+
+            # --- ADD THIS CLEANUP STEP ---
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            gc.collect()
             # --- Validation ---
             val_results = self.eval_epoch(epoch)
 
@@ -702,8 +727,108 @@ class DehazeTrainer:
         if is_main_process():
             self.writer.close()
 
+    def debug_memory_usage(self, resolution=512, batch_size=8):
+        """
+        Runs a single step with heavy memory instrumentation to find the OOM cause.
+        """
+        print(
+            f"\n{'=' * 20} STARTING MEMORY DEBUG {resolution}x{resolution} BS={batch_size} {'=' * 20}"
+        )
 
-# %%
+        # 1. Setup Profiler
+        profiler = MemoryProfiler(self.device)
+        profiler.print_status("Start (Empty Cache)")
+
+        # 2. Model Loading Impact
+        # Ensure models are in training mode
+        self.net_G.train()
+        self.net_D.train()
+        profiler.print_status("After Models Loaded")
+
+        # Print theoretical sizes
+        profiler.inspect_model(self.net_G, "Generator")
+        profiler.inspect_model(self.net_D, "Discriminator")
+        profiler.inspect_model(self.loss_perceptual, "VGG Loss")
+
+        # 3. Create a Dummy Batch (Simulation)
+        # We simulate data to avoid dataloader overhead confusion
+        print("\n[STEP] Creating Dummy Batch...")
+        x1 = torch.randn(batch_size, 3, resolution, resolution, device=self.device)
+        x0 = torch.randn(batch_size, 3, resolution, resolution, device=self.device)
+        profiler.print_status("Input Batch Loaded")
+
+        # 4. Generator Forward (Flow Matching)
+        print("\n[STEP] Generator Forward Pass...")
+        toggle_grad(self.net_D, requires_grad=False)
+        self.opt_G.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type=self.device.type):
+            t = torch.rand(batch_size, device=self.device)
+            # Path Sampler
+            x_t, u_t = path_sampler(x0, x1, t)
+
+            # UNet Forward - This creates the huge Activation Graph
+            v_t = self.net_G(x_t, t)
+            pred_imgs = x0 + v_t
+
+            # Discriminator Forward (on fake)
+            fake_output = self.net_D(pred_imgs)
+
+            # Loss Calc
+            loss_pixels = self.loss_pixels(pred_imgs, x1)
+            loss_flow = self.loss_flow(v_t, u_t)
+
+            # Perceptual Loss (Often heavy due to VGG activations)
+            loss_perceptual = self.loss_perceptual(
+                pred_imgs, x1, content_weight=1.0, style_weight=100.0
+            )
+
+            loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
+            loss_g = loss_flow + loss_pixels + loss_perceptual + loss_gen
+
+        profiler.print_status("After G Forward (Activations Stored)")
+
+        # 5. Generator Backward
+        print("\n[STEP] Generator Backward Pass...")
+        self.scaler.scale(loss_g).backward()
+        profiler.print_status("After G Backward (Gradients calculated)")
+
+        # 6. Generator Optimizer Step
+        print("\n[STEP] Generator Optimizer Step...")
+        self.scaler.step(self.opt_G)
+        self.scaler.update()
+        self.opt_G.zero_grad(set_to_none=True)  # Check if clearing helps
+        profiler.print_status("After G Optimizer (Adam States Created)")
+
+        # 7. Cleanup Intermediates before Discriminator
+        # This simulates what happens if we don't manage memory well
+        del loss_g, loss_flow, loss_pixels, loss_perceptual, loss_gen, v_t, u_t, x_t
+        # Keep pred_imgs needed for D training
+
+        # 8. Discriminator Training
+        print("\n[STEP] Discriminator Loop...")
+        toggle_grad(self.net_D, requires_grad=True)
+        self.opt_D.zero_grad(set_to_none=True)
+
+        with torch.autocast(device_type=self.device.type):
+            detached_fake = pred_imgs.detach()
+            combined_input = torch.cat([x1, detached_fake], dim=0)
+
+            # D Forward
+            combined_output = self.net_D(combined_input)
+            # D Loss
+            # (Simplifying split for debug)
+            loss_d = combined_output.mean()
+
+        profiler.print_status("After D Forward")
+
+        self.scaler.scale(loss_d).backward()
+        profiler.print_status("After D Backward")
+
+        self.scaler.step(self.opt_D)
+        profiler.print_status("After D Optimizer")
+
+        print(f"\n{'=' * 20} DEBUG COMPLETE {'=' * 20}")
 
 
 # %%
@@ -786,13 +911,15 @@ if __name__ == "__main__":
         trainer.train_sampler = train_sampler
 
         # 2. Run the training for this stage
-        trainer.train_stage(
-            stage_index,
-            epochs,
-            patience,
-            checkpoint_dir=cfg.CHECKPOINT_DIR,
-            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
-        )
+        #        trainer.train_stage(
+        #            stage_index,
+        #            epochs,
+        #            patience,
+        #            checkpoint_dir=cfg.CHECKPOINT_DIR,
+        #            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
+        #        )
+        if is_main_process():
+            trainer.debug_memory_usage(resolution=512, batch_size=4)
 
         dist.barrier()
 

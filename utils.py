@@ -1,6 +1,7 @@
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.utils.data.distributed import DistributedSampler
 from data.utils import get_haze_transforms, partition_dataset

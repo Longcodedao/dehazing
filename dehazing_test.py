@@ -39,37 +39,12 @@ from utils import (
     pad_to_multiple,
     unpad,
 )
+from utils_ddp import is_main_process, setup_ddp, clean_ddp, reduce_tensor
 import io
 from contextlib import redirect_stdout
+from memory_profiler import MemoryProfiler
 import yaml
 import gc
-
-
-# %%
-# -----------------------------------------------------
-# DDP Setup Helpers
-# -----------------------------------------------------
-def setup_ddp():
-    dist.init_process_group(backend="nccl")
-    local_rank = int(os.environ["LOCAL_RANK"])
-    torch.cuda.set_device(local_rank)
-    return local_rank
-
-
-def clean_ddp():
-    dist.destroy_process_group()
-
-
-def is_main_process():
-    return dist.get_rank() == 0.0
-
-
-def reduce_tensor(tensor):
-    """Reduces a tensor across all GPUs (averages it) for metric logging."""
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= dist.get_world_size()
-    return rt
 
 
 # %%
@@ -200,48 +175,6 @@ def setup_config(args):
 
 
 # %%
-class MemoryProfiler:
-    def __init__(self, device):
-        self.device = device
-        self.last_allocated = 0
-        self.last_reserved = 0
-
-        # Reset peak stats at start
-        torch.cuda.reset_peak_memory_stats(device)
-
-    def _to_gb(self, bytes_val):
-        return bytes_val / 1024**3
-
-    def print_status(self, tag=""):
-        # Force sync to get accurate reading
-        torch.cuda.synchronize(self.device)
-
-        allocated = torch.cuda.memory_allocated(self.device)
-        reserved = torch.cuda.memory_reserved(self.device)
-        max_allocated = torch.cuda.max_memory_allocated(self.device)
-
-        delta_alloc = allocated - self.last_allocated
-
-        print(f"\n[MEM] --- {tag} ---")
-        print(
-            f"   Active Used: {self._to_gb(allocated):.2f} GB (Delta: {self._to_gb(delta_alloc):+.2f} GB)"
-        )
-        print(f"   Cache/Resrv: {self._to_gb(reserved):.2f} GB")
-        print(f"   Peak So Far: {self._to_gb(max_allocated):.2f} GB")
-
-        self.last_allocated = allocated
-        self.last_reserved = reserved
-
-    def inspect_model(self, model, name="Model"):
-        param_size = 0
-        for param in model.parameters():
-            param_size += param.nelement() * param.element_size()
-        buffer_size = 0
-        for buffer in model.buffers():
-            buffer_size += buffer.nelement() * buffer.element_size()
-
-        total_size_mb = (param_size + buffer_size) / 1024**2
-        print(f"[INFO] {name} Theoretical Size: {total_size_mb:.2f} MB")
 
 
 # %%
@@ -743,7 +676,8 @@ class DehazeTrainer:
         # Ensure models are in training mode
         self.net_G.train()
         self.net_D.train()
-        profiler.print_status("After Models Loaded")
+        if is_main_process():
+            profiler.print_status("After Models Loaded")
 
         # Print theoretical sizes
         profiler.inspect_model(self.net_G, "Generator")
@@ -752,13 +686,16 @@ class DehazeTrainer:
 
         # 3. Create a Dummy Batch (Simulation)
         # We simulate data to avoid dataloader overhead confusion
-        print("\n[STEP] Creating Dummy Batch...")
+        if is_main_process():
+            print("\n[STEP] Creating Dummy Batch...")
         x1 = torch.randn(batch_size, 3, resolution, resolution, device=self.device)
         x0 = torch.randn(batch_size, 3, resolution, resolution, device=self.device)
         profiler.print_status("Input Batch Loaded")
 
         # 4. Generator Forward (Flow Matching)
-        print("\n[STEP] Generator Forward Pass...")
+        if is_main_process():
+            print("\n[STEP] Generator Forward Pass...")
+
         toggle_grad(self.net_D, requires_grad=False)
         self.opt_G.zero_grad(set_to_none=True)
 
@@ -780,7 +717,7 @@ class DehazeTrainer:
 
             # Perceptual Loss (Often heavy due to VGG activations)
             loss_perceptual = self.loss_perceptual(
-                pred_imgs, x1, content_weight=1.0, style_weight=100.0
+                pred_imgs, x1, content_weight=1.0, style_weight=100.0, display=False
             )
 
             loss_gen = self.loss_adversarial(D_out_fake=fake_output, mode="G")
@@ -789,12 +726,14 @@ class DehazeTrainer:
         profiler.print_status("After G Forward (Activations Stored)")
 
         # 5. Generator Backward
-        print("\n[STEP] Generator Backward Pass...")
+        if is_main_process():
+            print("\n[STEP] Generator Backward Pass...")
         self.scaler.scale(loss_g).backward()
         profiler.print_status("After G Backward (Gradients calculated)")
 
         # 6. Generator Optimizer Step
-        print("\n[STEP] Generator Optimizer Step...")
+        if is_main_process():
+            print("\n[STEP] Generator Optimizer Step...")
         self.scaler.step(self.opt_G)
         self.scaler.update()
         self.opt_G.zero_grad(set_to_none=True)  # Check if clearing helps
@@ -806,7 +745,8 @@ class DehazeTrainer:
         # Keep pred_imgs needed for D training
 
         # 8. Discriminator Training
-        print("\n[STEP] Discriminator Loop...")
+        if is_main_process():
+            print("\n[STEP] Discriminator Loop...")
         toggle_grad(self.net_D, requires_grad=True)
         self.opt_D.zero_grad(set_to_none=True)
 
@@ -828,7 +768,8 @@ class DehazeTrainer:
         self.scaler.step(self.opt_D)
         profiler.print_status("After D Optimizer")
 
-        print(f"\n{'=' * 20} DEBUG COMPLETE {'=' * 20}")
+        if is_main_process():
+            print(f"\n{'=' * 20} DEBUG COMPLETE {'=' * 20}")
 
 
 # %%
@@ -918,8 +859,17 @@ if __name__ == "__main__":
         #            checkpoint_dir=cfg.CHECKPOINT_DIR,
         #            checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
         #        )
+        capture_buffer = io.StringIO()
+        with redirect_stdout(capture_buffer):
+            # We call this just to trigger the print statements.
+
+            trainer.debug_memory_usage(resolution=512, batch_size=8)
+
+        avg_debug = capture_buffer.getvalue()
         if is_main_process():
-            trainer.debug_memory_usage(resolution=512, batch_size=4)
+            output_debug = "memory_debug.txt"
+            with open(output_debug, "w") as f:
+                f.write(avg_debug)
 
         dist.barrier()
 

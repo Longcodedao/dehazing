@@ -211,26 +211,6 @@ class DehazeTrainer:
         # Note: Access underlying model for inference/sampling using .module
         self.ode_solver = ODESolver(self.net_G.module, nfe=10)
 
-        # Declaring the Optimizers
-        self.opt_G = optim.Adam(
-            self.net_G.parameters(),
-            lr=cfg.OPTIM.LR,
-            betas=(cfg.OPTIM.BETA1, cfg.OPTIM.BETA2),
-            weight_decay=cfg.OPTIM.WEIGHT_DECAY,
-        )
-
-        self.opt_D = optim.Adam(
-            self.net_D.parameters(),
-            lr=cfg.OPTIM.LR,
-            betas=(cfg.OPTIM.BETA1, cfg.OPTIM.BETA2),
-        )
-        self.scheduler_G = optim.lr_scheduler.StepLR(
-            self.opt_G, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
-        )
-        self.scheduler_D = optim.lr_scheduler.StepLR(
-            self.opt_D, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
-        )
-
         # Placeholders
         self.train_loader = None
         self.val_loader = None
@@ -278,6 +258,30 @@ class DehazeTrainer:
             self.val_loader = dataloader
         else:
             raise ValueError("Only support 2 modes ('train' and 'eval')")
+
+    def reset_optimization(self):
+        if is_main_process():
+            print("[!] Resetting Optimizers and Schedulers for new stage...")
+
+        # Re-initialize Optimizers (Clears Momentum, resets LR to config base)
+        self.opt_G = optim.Adam(
+            self.net_G.parameters(),
+            lr=cfg.OPTIM.LR,
+            betas=(cfg.OPTIM.BETA1, cfg.OPTIM.BETA2),
+            weight_decay=cfg.OPTIM.WEIGHT_DECAY,
+        )
+
+        self.opt_D = optim.Adam(
+            self.net_D.parameters(),
+            lr=cfg.OPTIM.LR,
+            betas=(cfg.OPTIM.BETA1, cfg.OPTIM.BETA2),
+        )
+        self.scheduler_G = optim.lr_scheduler.StepLR(
+            self.opt_G, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
+        )
+        self.scheduler_D = optim.lr_scheduler.StepLR(
+            self.opt_D, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
+        )
 
     def save_checkpoints(self, path):
         if not is_main_process():
@@ -573,6 +577,11 @@ class DehazeTrainer:
     ):
         """Runs the complete training cycle for a single stage (resolution)."""
         self.stage_index = stage_index
+
+        # Start with fresh and no stale momentum
+        # If we find a checkpoint later, the optimizer and scheduler state gets overwritten
+        self.reset_optimization()
+
         best_metric = -float("inf")
         epochs_no_improve = 0
 

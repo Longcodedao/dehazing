@@ -99,7 +99,7 @@ ssim_eval = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
 
 model = UNet().to(device)
 ode_solver = ODESolver(model, nfe=20)
-model_path = "checkpoints/flow_matching_v1_stage2/best/chkpoint_best_s3.pt"
+model_path = "checkpoints/flow_matching_v1.1/best/chkpoint_best_s3.pt"
 checkpoint = torch.load(model_path, map_location=device)
 state_dict = checkpoint["G_state_dict"]
 new_state_dict = {}

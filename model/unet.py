@@ -174,7 +174,6 @@ class AttentionBlock(nn.Module):
         # Apply padding to ensure the H, W is the multiple of self.patch_size
         x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
 
-
         Hp, Wp = x_enhanced.shape[-2:]
         # 2. Patch partition & Platten
         # (B, C, H, W) -> (B, Num_Patches, Patch_Dim)
@@ -277,9 +276,11 @@ class DownBlock(nn.Module):
         x = self.res_block1(x, t_emb)
         x = self.attn(x)
         x = self.res_block2(x, t_emb)
+
+        skip_feature = x
         x = self.downsample(x)
 
-        return x
+        return x, skip_feature
 
 
 class UpBlock(nn.Module):
@@ -378,17 +379,15 @@ class UNet(nn.Module):
             time_emb_dim=256,
             use_checkpoint=use_checkpoint,
         )
-
         reversed_dim = list(reversed(list_dims))
         up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
-        dim_skip = reversed_dim[1:]
 
         for i, (d_in, d_out) in enumerate(up_in_out):
             use_attn = i < 2
             self.ups.append(
                 UpBlock(
                     d_in,
-                    dim_skip[i],
+                    d_in,
                     d_out,
                     attn=use_attn,
                     use_checkpoint=use_checkpoint,
@@ -418,8 +417,11 @@ class UNet(nn.Module):
 
         skips = []
         for i, down in enumerate(self.downs):
-            skips.append(x)
-            x = down(x, t_emb)
+            x, skip_feat = down(x, t_emb)
+            print(f"Index {i}:")
+            print(f"Shape of x is: {x.shape}")
+            print(f"Shape of skip_feature is: {skip_feat.shape}")
+            skips.append(skip_feat)
             if profiler:
                 profiler.print_status(f"  [UNet] Down {i}")
 
@@ -429,8 +431,12 @@ class UNet(nn.Module):
         if profiler:
             profiler.print_status("  [UNet] Mid Block")
 
+        skips = skips[::-1]
+        print("\nStart UpConvolution")
         for up in self.ups:
-            skip = skips.pop()
+            skip = skips.pop(0)
+            print(f"Shape of x is: {x.shape}")
+            print(f"Shape of skip_feature is: {skip.shape}")
             x = up(x, t_emb, skip)
             if profiler:
                 profiler.print_status(f"  [UNet] Up {i}")

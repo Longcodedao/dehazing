@@ -1,163 +1,179 @@
 # %%
-from data.utils import get_haze_transforms, restandardize_tensor
-from model.unet import UNet
 import torch
-from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-from PIL import Image
-import pandas as pd
-from tqdm.notebook import tqdm
-from model.flow_matching import ODESolver
-
-
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-from torchmetrics import MeanMetric, MetricCollection
-
-from utils import pad_to_multiple, unpad
+import torch.nn as nn
+from model.unet import *
 
 
 # %%
-# Getting the SOTS dataset
-class RESIDE_SOTS_Indoor(Dataset):
-    def __init__(self, dataset_path, transform=None, metadata="metadata.csv"):
-        self.root_dir = Path(dataset_path)
-        self.metadata_csv = pd.read_csv(self.root_dir / metadata)
-
-        self.transform = transform
-        self.data = []
-        for idx, row in self.metadata_csv.iterrows():
-            clean_path = self.root_dir / "indoor" / row["clear_image_path"]
-            hazy_paths_str = row["hazy_image_paths"]
-            hazy_image_paths = [
-                path.strip()
-                for path in hazy_paths_str.strip("[]").replace("'", "").split(",")
-            ]
-            list_hazy_paths = [
-                self.root_dir / "indoor" / hazy_path for hazy_path in hazy_image_paths
-            ]
-            for hazy_path in list_hazy_paths:
-                data_item = {"index": idx, "clean": clean_path, "hazy": hazy_path}
-
-                self.data.append(data_item)
-
-    def __repr__(self):
-        return "RESIDE Indoor"
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        data_item = self.data[idx]
-        clean_path = data_item["clean"]
-        hazy_path = data_item["hazy"]
-
-        try:
-            clean_img = Image.open(clean_path).convert("RGB")
-            hazy_img = Image.open(hazy_path).convert("RGB")
-        except FileNotFoundError:
-            print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
-            return self.__getitem__((idx + 1) % len(self))
-
-        if self.transform:
-            clean_img, hazy_img = self.transform(clean_img, hazy_img)
-        else:
-            clean_img = (
-                torch.as_tensor(np.array(clean_img)).permute(2, 0, 1).float() / 255.0
+class DownBlock(nn.Module):
+    def __init__(
+        self,
+        dim_in,
+        dim_out,
+        attn=False,
+        time_embed_dim=256,
+        num_heads=4,
+        dim_head=32,
+        groups=8,
+        use_checkpoint=False,
+    ):
+        super().__init__()
+        self.res_block1 = ResNetBlock(
+            dim_in,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
+        )
+        self.res_block2 = ResNetBlock(
+            dim_out,
+            dim_out,
+            time_emb_dim=time_embed_dim,
+            groups=groups,
+            use_checkpoint=use_checkpoint,
+        )
+        self.attn = (
+            AttentionBlock(
+                dim_out,
+                heads=num_heads,
+                dim_head=dim_head,
+                groups=groups,
+                use_checkpoint=use_checkpoint,
             )
-            hazy_img = (
-                torch.as_tensor(np.array(hazy_img)).permute(2, 0, 1).float() / 255.0
+            if attn
+            else nn.Identity()
+        )
+
+        self.downsample = nn.Conv2d(
+            dim_out, dim_out, kernel_size=4, stride=2, padding=1
+        )
+
+    def forward(self, x, t_emb):
+        x = self.res_block1(x, t_emb)
+        x = self.attn(x)
+        x = self.res_block2(x, t_emb)
+
+        skip_feature = x
+        x = self.downsample(x)
+
+        return x, skip_feature
+
+
+class UNet(nn.Module):
+    def __init__(
+        self, dim=64, channels=3, dim_mults=(1, 2, 4, 8), use_checkpoint=False
+    ):
+        super().__init__()
+        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
+        self.time_mlp = nn.Sequential(
+            SinusoidalPosEmb(dim),
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Linear(dim * 4, 256),
+        )
+
+        list_dims = [dim * m for m in dim_mults]
+        list_dims = [dim] + list_dims
+        in_out = list(zip(list_dims[:-1], list_dims[1:]))
+
+        self.downs = nn.ModuleList([])
+        self.ups = nn.ModuleList([])
+        for i, (d_in, d_out) in enumerate(in_out):
+            use_attn = i >= 2
+            self.downs.append(
+                DownBlock(d_in, d_out, attn=use_attn, use_checkpoint=use_checkpoint)
             )
 
-        return clean_img, hazy_img
-
-
-val_sots = get_haze_transforms(
-    dataset_name="RESIDE_SOTS_Indoor", split="val", verbose=True
-)
-sots_indoor = RESIDE_SOTS_Indoor(
-    dataset_path="dataset/reside-sots/",
-    transform=val_sots,
-    metadata="metadata_indoor.csv",
-)
-
-val_loader = DataLoader(
-    sots_indoor, batch_size=8, shuffle=False, pin_memory=True, num_workers=4
-)
-
-# %%
-device = torch.device("cuda:3")
-eval_metrics = MetricCollection(
-    {
-        "psnr": MeanMetric().to(device),
-        "ssim": MeanMetric().to(device),
-    }
-)
-psnr_eval = PeakSignalNoiseRatio(data_range=1.0, reduction="none").to(device)
-ssim_eval = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-
-
-model = UNet().to(device)
-ode_solver = ODESolver(model, nfe=20)
-model_path = "checkpoints/flow_matching_v1.1/best/chkpoint_best_s3.pt"
-checkpoint = torch.load(model_path, map_location=device)
-state_dict = checkpoint["G_state_dict"]
-new_state_dict = {}
-
-# Iterate over all keys and remove the 'module.' prefix
-for key, value in state_dict.items():
-    # Only remove 'module.' prefix if it exists
-    if key.startswith("module."):
-        new_key = key[7:]  # Slicing from index 7 removes 'module.'
-    else:
-        new_key = key
-    new_state_dict[new_key] = value
-
-model = model.load_state_dict(new_state_dict, strict=False)
-
-
-# %%
-## Try to load the dataloader
-
-pbar = tqdm(val_loader, "Evaluating", leave=True)
-with torch.no_grad():
-    for idx, batch in enumerate(pbar):
-        x1, x0 = batch
-        x1 = x1.to(device)
-        x0 = x0.to(device)
-
-        clean_imgs = x1
-        hazy_imgs = x0
-
-        padded_hazy, pad_h, pad_w = pad_to_multiple(hazy_imgs, multiple=32)
-
-        with torch.autocast(device_type=device.type):
-            pred_padded = ode_solver.sample(padded_hazy)
-
-        pred_imgs = unpad(pred_padded, pad_h, pad_w)
-        pred_original = restandardize_tensor(pred_imgs)
-        target_original = restandardize_tensor(clean_imgs)
-
-        eval_metrics["psnr"].update(
-            psnr_eval(pred_original.detach(), target_original.detach())
+        self.mid_block1 = ResNetBlock(
+            list_dims[-1],
+            list_dims[-1],
+            time_emb_dim=256,
+            use_checkpoint=use_checkpoint,
         )
-        eval_metrics["ssim"].update(
-            ssim_eval(pred_original.detach(), target_original.detach())
+        self.mid_attn = AttentionBlock(list_dims[-1], use_checkpoint=use_checkpoint)
+        self.mid_block2 = ResNetBlock(
+            list_dims[-1],
+            list_dims[-1],
+            time_emb_dim=256,
+            use_checkpoint=use_checkpoint,
+        )
+        print("List dim: ", list_dims)
+        reversed_dim = list(reversed(list_dims))
+        up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
+
+        print("Reverse dim: ", reversed_dim)
+        for i, (d_in, d_out) in enumerate(up_in_out):
+            use_attn = i < 2
+            self.ups.append(
+                UpBlock(
+                    d_in,
+                    d_in,
+                    d_out,
+                    attn=use_attn,
+                    use_checkpoint=use_checkpoint,
+                )
+            )
+
+        self.final_conv = nn.Sequential(
+            ResNetBlock(dim, dim, use_checkpoint=use_checkpoint),
+            nn.Conv2d(dim, channels, kernel_size=1),
         )
 
-        psnr_value = eval_metrics["psnr"].compute()
-        ssim_value = eval_metrics["ssim"].compute()
+    def forward(self, x, t, profiler=None):
+        """
+        Args:
+        x: input of the haze image
+        t: Timeline
 
-        pbar.set_postfix(
-            {
-                "PSNR": f"{psnr_value:.4f}",
-                "SSIM": f"{ssim_value:.4f}",
-            }
-        )
-# Compute the local Results
-local_psnr = eval_metrics["psnr"].compute()
-local_ssim = eval_metrics["ssim"].compute()
+        Returns: out: Clean image
+        """
+        if profiler:
+            profiler.print_status("  [UNet] Start")
 
-print(f"PSNR: {local_psnr:.2f}\tSSIM: {local_ssim:.2f}")
+        t_emb = self.time_mlp(t)
+        x = self.init_conv(x)
+        if profiler:
+            profiler.print_status("  [UNet] Init Conv")
+
+        skips = []
+        for i, down in enumerate(self.downs):
+            x, skip_feat = down(x, t_emb)
+            print(f"Index {i}:")
+            print(f"Shape of x is: {x.shape}")
+            print(f"Shape of skip_feature is: {skip_feat.shape}")
+            skips.append(skip_feat)
+            if profiler:
+                profiler.print_status(f"  [UNet] Down {i}")
+
+        x = self.mid_block1(x, t_emb)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, t_emb)
+        if profiler:
+            profiler.print_status("  [UNet] Mid Block")
+
+        skips = skips[::-1]
+        print("\nStart UpConvolution")
+        for up in self.ups:
+            skip = skips.pop(0)
+            print(f"Shape of x is: {x.shape}")
+            print(f"Shape of skip_feature is: {skip.shape}")
+            x = up(x, t_emb, skip)
+            if profiler:
+                profiler.print_status(f"  [UNet] Up {i}")
+            # print("-------------")
+
+        out = self.final_conv(x)
+        if profiler:
+            profiler.print_status("  [UNet] End")
+        return out
+
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+t = torch.rand(1)
+x = torch.randn(1, 3, 256, 256)
+model = UNet()
+output = model(x, t)
+
+print(output)
 
 # %%

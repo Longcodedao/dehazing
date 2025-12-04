@@ -174,7 +174,6 @@ class AttentionBlock(nn.Module):
         # Apply padding to ensure the H, W is the multiple of self.patch_size
         x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
 
-
         Hp, Wp = x_enhanced.shape[-2:]
         # 2. Patch partition & Platten
         # (B, C, H, W) -> (B, Num_Patches, Patch_Dim)

@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import Dataset
+from torchvision.transforms import v2
 from PIL import Image
 from pathlib import Path
 import pandas as pd
@@ -45,6 +46,17 @@ class RESIDE_Indoor(Dataset):
         except FileNotFoundError:
             print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
             return self.__getitem__((idx + 1) % len(self))
+
+        # Check if the size differs so that we can crop to have the same size
+        w_clean, h_clean = clean_img.size
+        w_hazy, h_hazy = hazy_img.size
+
+        if clean_img.size != hazy_img.size:
+            common_w = min(w_clean, w_hazy)
+            common_h = min(h_clean, h_hazy)
+
+            clean_img = v2.CenterCrop(size=(common_w, common_h))(clean_img)
+            hazy_img = v2.CenterCrop(size=(common_w, common_h))(hazy_img)
 
         if self.transform:
             clean_img, hazy_img = self.transform(clean_img, hazy_img)
@@ -99,6 +111,17 @@ class RESIDE_SOTS_Indoor(Dataset):
         except FileNotFoundError:
             print(f"Error: Missing image file at {clean_path} or {hazy_path}. Skipping")
             return self.__getitem__((idx + 1) % len(self))
+
+        # Check if the size differs so that we can crop to have the same size
+        w_clean, h_clean = clean_img.size
+        w_hazy, h_hazy = hazy_img.size
+
+        if clean_img.size != hazy_img.size:
+            common_w = min(w_clean, w_hazy)
+            common_h = min(h_clean, h_hazy)
+
+            clean_img = v2.CenterCrop(size=(common_w, common_h))(clean_img)
+            hazy_img = v2.CenterCrop(size=(common_w, common_h))(hazy_img)
 
         if self.transform:
             clean_img, hazy_img = self.transform(clean_img, hazy_img)

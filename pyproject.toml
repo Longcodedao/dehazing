@@ -42,6 +42,7 @@ dependencies = [
   "jupyter>=1.1.1",
   "yacs>=0.1.8",
   "tensorboard>=2.20.0",
+  "calflops>=0.3.2",
 ]
 
 # --- UV-specific Configuration ---

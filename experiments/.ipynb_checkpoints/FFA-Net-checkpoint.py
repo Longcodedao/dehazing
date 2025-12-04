@@ -829,13 +829,13 @@ trainer = DehazeTrainer_Normal(cfg, net_G, mean=cfg.DATA.MEAN, std=cfg.DATA.STD)
 trainer.load_dataloader(train_loader, mode="train")
 trainer.load_dataloader(val_loader, mode="eval")
 
-trainer.debug_memory_usage(resolution = 240, batch_size = 8)
-# trainer.train_stage(
-#     total_epochs=cfg.TRAIN.TOTAL_EPOCHS,
-#     patience=cfg.TRAIN.PATIENCE,
-#     checkpoint_dir=cfg.CHECKPOINT_DIR,
-#     checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
-#     eval_interval=1,
-# )
+# trainer.debug_memory_usage(resolution = 240, batch_size = 8)
+trainer.train_stage(
+    total_epochs=cfg.TRAIN.TOTAL_EPOCHS,
+    patience=cfg.TRAIN.PATIENCE,
+    checkpoint_dir=cfg.CHECKPOINT_DIR,
+    checkpoint_interval=cfg.CHECKPOINT_INTERVAL,
+    eval_interval=1,
+)
 
 # %%

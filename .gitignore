@@ -22,3 +22,7 @@ model/__pycache__/*
 
 losses/__pycache__/
 losses/__pycache__/*
+losses/.ipynb_checkpoints/
+losses/.ipynb_checkpoints/*
+
+.ipynb_checkpoints/

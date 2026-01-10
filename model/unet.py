@@ -4,445 +4,321 @@ import math
 from einops import rearrange
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
+from yacs.config import CfgNode as CN
+import os 
+from mamba_ssm import Mamba
+
+# Import the defaults we just created
+from .config_model import get_model_cfg_defaults
 
 
-class SinusoidalPosEmb(nn.Module):
+# --- HELPER: Config Loader ---
+def get_model_config(config_path_or_name):
     """
-    Note that the implementation is a little bit different from the
-    Transformers paper but when fed in the linear layers, they learn the weighted
-    sums accross the entire input vector
-    => All positional information are fully encoded
+    Returns a YACS CfgNode.
+    Args:
+        config_path_or_name: "small", "large", or path to .yaml file
     """
+    cfg = get_model_cfg_defaults()
+    
+    # 1. Handle Shortnames
+    if config_path_or_name == "small":
+        config_path_or_name = "configs/model_cfgs/small.yaml"
+    elif config_path_or_name == "large":
+        config_path_or_name = "configs/model_cfgs/large.yaml"
+        
+    # 2. Merge YAML if exists
+    if os.path.exists(config_path_or_name):
+        cfg.merge_from_file(config_path_or_name)
+        cfg.freeze() # Prevent accidental modification
+        return cfg
+    else:
+        # Fallback or Error
+        print(f"Warning: Config {config_path_or_name} not found. Using Defaults.")
+        return cfg
 
+        
+
+class PhysConvNeXtBlock(nn.Module):
+    """
+    ConvNeXt V2 Block: Best for local textures and edges.
+    Includes Adaptive Layer Norm (AdaLN) for Time Embedding injection.
+    """
+    def __init__(self, dim, mult=2):
+        super().__init__()
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, 4 * dim) 
+        self.act = nn.GELU()
+        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(1e-6 * torch.ones((dim)), requires_grad=True)
+
+    def forward(self, x, t_emb=None):
+        input = x
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
+        
+        # Adaptive Layer Norm (Time Injection)
+        if t_emb is not None:
+            # t_emb is (N, C) -> Scale & Shift
+            x = self.norm(x)
+            scale, shift = t_emb.chunk(2, dim=1)
+            x = x * (1 + scale.unsqueeze(1).unsqueeze(1)) + shift.unsqueeze(1).unsqueeze(1)
+        else:
+            x = self.norm(x)
+
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
+        x = self.gamma * x
+        x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
+        return input + x
+        
+
+class PhysBiMambaBlock(nn.Module):
+    """
+    Bidirectional Mamba Block (BiMamba)
+    Scans the image Forward AND Backward so the top-left pixel
+    can 'see' the bottom-right pixel.
+    """
     def __init__(self, dim):
         super().__init__()
-        self.dim = dim
+        self.norm = nn.LayerNorm(dim)
+        
+        self.mamba_fwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+        self.mamba_bwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
 
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-
-        exponential_denominator = half_dim - 1
-        log_base = math.log(10000.0)
-        c = log_base / (exponential_denominator)
-
-        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
-        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
-
-        # Apply the frequencies to the input scaler (t)
-        # t has shape (batch_size, 1) and frequencies has shape (1, half_dim)
-        arguments = x[:, None] * frequencies[None, :]
-
-        return torch.cat((arguments.sin(), arguments.cos()), dim=-1)
-
-    def forward_original(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-
-        exponential_denominator = half_dim - 1
-        log_base = math.log(10000.0)
-        c = log_base / (exponential_denominator)
-
-        # Frequencies = 1 / (10000 ^ (i / (d_model // 2 - 1))
-        frequencies = torch.exp(torch.arange(half_dim, device=device) * -c)
-
-        arguments = x[:, None] * frequencies[None, :]
-
-        sin_component = arguments.sin()
-        cos_component = arguments.cos()
-
-        stacked = torch.stack((sin_component, cos_component), dim=-1)
-
-        # Reshape(batch_size, half_dim, 2) to (batch_size, half_dim * 2)
-        # Collapsing the final dimension and let those elements interleaved together
-        interleaved_eb = stacked.view(x.shape[0], -1)
-        return interleaved_eb
-
-
-class ResNetBlock(nn.Module):
-    def __init__(self, dim, dim_out, time_emb_dim=None, groups=8, use_checkpoint=False):
-        super().__init__()
-        self.use_checkpoint = use_checkpoint
-
-        self.time_mlp = (
-            nn.Sequential(nn.Linear(time_emb_dim, dim_out), nn.SiLU())
-            if time_emb_dim
-            else None
+        # 2. THE FUSION LAYER (The upgrade)
+        # Takes both directions (dim * 2) and learns how to combine them back to (dim)
+        self.fusion_linear = nn.Linear(dim * 2, dim)
+        
+        # Optional: A Gate to let the network choose emphasis
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(dim * 2, dim),
+            nn.Sigmoid()
         )
-        self.block1 = nn.Sequential(
-            nn.Conv2d(dim, dim_out, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, dim_out),
-            nn.SiLU(),
-        )
-        self.block2 = nn.Sequential(
-            nn.Conv2d(dim_out, dim_out, kernel_size=3, padding=1),
-            nn.GroupNorm(groups, dim_out),
-            nn.SiLU(),
-        )
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else nn.Identity()
+    def forward(self, x, t_emb=None):
+        """
+        x: (B, C, H, W)
+        """
+        B, C, H, W = x.shape
+        residual = x
+        
+        # 1. Prepare Sequence: (B, C, H, W) -> (B, L, C)
+        x_flat = x.flatten(2).transpose(1, 2) # (B, L, C)
+        x_norm = self.norm(x_flat)
 
-    def forward_impl(self, x, time_embed=None):
-        h = self.block1(x)
-        if self.time_mlp is not None and time_embed is not None:
-            h = h + self.time_mlp(time_embed)[:, :, None, None]
-        h = self.block2(h)
-        shortcut_h = self.res_conv(x)
+        # 2. Inject Time
+        if t_emb is not None:
+             # Take only the first half (scale) for simple addition
+            t_val, _ = t_emb.chunk(2, dim=1)
+            # print(f'x_norm: {x_norm.shape}')
+            # print(f't_val: {t_val.unsqueeze(1).shape}')
+            x_norm = x_norm + t_val.unsqueeze(1)
 
-        return h + shortcut_h
-
-    def forward(self, x, time_embed=None):
-        if self.training and self.use_checkpoint:
-            # Checkpointing requires inputs to require_grad for backward to work correctly
-            # Often x requires grad, but time_embed might not.
-            return checkpoint.checkpoint(
-                self.forward_impl, x, time_embed, use_reentrant=False
-            )
-        else:
-            return self.forward_impl(x, time_embed)
-
-
-class AttentionBlock(nn.Module):
-    def __init__(
-        self, dim, heads=4, dim_head=32, groups=8, patch_size=8, use_checkpoint=False
-    ):
-        super().__init__()
-        self.use_checkpoint = use_checkpoint
-        self.scale = dim_head ** (-0.5)
-        self.heads = heads
-        self.patch_size = patch_size
-        hidden_dim = heads * dim_head
-
-        # Add Multi-Scale Context
-        # We are going to diversify the context field by embedding
-        # multi convolution with different dilations
-        internal_dim = dim // 4
-        self.msc_conv1 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=1, dilation=1
-        )
-        self.msc_conv2 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=2, dilation=2
-        )
-        self.msc_conv3 = nn.Conv2d(
-            dim, internal_dim, kernel_size=3, padding=4, dilation=4
-        )
-        self.msc_conv4 = nn.Conv2d(
-            dim, dim - (3 * internal_dim), kernel_size=3, padding=1, dilation=1
-        )
-        self.msc_merge = nn.Sequential(
-            nn.Conv2d(dim * 2, dim, kernel_size=1), nn.GroupNorm(groups, dim), nn.SiLU()
-        )
-
-        # --- Patch Embedding Projections
-        # Fllatened Patch Dimension = C * P * P
-        patch_dim = dim * patch_size * patch_size
-
-        # Project patch -> Embedding (dim)
-        self.patch_to_emb = nn.Linear(patch_dim, dim)
-
-        # Project Embedding -> Patch
-        self.emb_to_patch = nn.Linear(dim, patch_dim)
-
-        # --- Global Attention Projection ---
-        self.to_qkv = nn.Linear(dim, hidden_dim * 3, bias=False)
-        self.to_out = nn.Linear(hidden_dim, dim)
-
-    def paddding(self, x):
-        """Ensure (H, W) of the image x are divisible by patch_size"""
-        h, w = x.shape[-2:]
-
-        pad_l = pad_t = 0
-        pad_r = (self.patch_size - w % self.patch_size) % self.patch_size
-        pad_b = (self.patch_size - h % self.patch_size) % self.patch_size
-
-        if pad_r > 0 or pad_b > 0:
-            x = F.pad(x, (pad_l, pad_r, pad_t, pad_b))
-
-        return x, pad_r, pad_b
-
-    def forward_impl(self, x):
-        b, c, h, w = x.shape
-
-        # 1. Multi-Scale
-        x1 = self.msc_conv1(x)
-        x2 = self.msc_conv2(x)
-        x3 = self.msc_conv3(x)
-        x4 = self.msc_conv4(x)
-
-        x_merge = torch.concatenate([x1, x2, x3, x4], dim=1)
-        x_enhanced = torch.concatenate([x, x_merge], dim=1)
-        x_enhanced = self.msc_merge(x_enhanced)
-        # Apply padding to ensure the H, W is the multiple of self.patch_size
-        x_enhanced, pad_r, pad_b = self.paddding(x_enhanced)
-
-        Hp, Wp = x_enhanced.shape[-2:]
-        # 2. Patch partition & Platten
-        # (B, C, H, W) -> (B, Num_Patches, Patch_Dim)
-        # Patch_Dim = C * P * P
-        x_patches = rearrange(
-            x_enhanced,
-            "b c (h p1) (w p2) -> b (h w) (c p1 p2)",
-            p1=self.patch_size,
-            p2=self.patch_size,
-        )
-        # 3. Patch Embedding (Projection to 'dim')
-        # (B, N, C * P * P) -> (B, N, C)
-        x_emb = self.patch_to_emb(x_patches)
-        # 4. Global Attention on Patches
-        qkv = self.to_qkv(x_emb).chunk(3, dim=-1)
-
-        q, k, v = map(lambda t: rearrange(t, "b n (h d) -> b h n d", h=self.heads), qkv)
-
-        q = q * self.scale
-        attention = torch.einsum("b h i d, b h j d -> b h i j", q, k)
-
-        attention = attention.softmax(dim=-1)
-        out = torch.einsum("b h i j, b h j d -> b h i d", attention, v)
-
-        # Merge head
-        out = rearrange(out, "b h n d -> b n (h d)")
-
-        # 5. Output Projection & Un-Embedding
-        out = self.to_out(out)
-        out = self.emb_to_patch(out)
-
-        # 6. Un-Patchify (Reshape back to image)
-        # (B, H/P * W/P, C*P*P) -> (B, C, H, W)
-        out = rearrange(
-            out,
-            "b (h w) (c p1 p2) -> b c (h p1) (w p2)",
-            h=Hp // self.patch_size,
-            w=Wp // self.patch_size,
-            p1=self.patch_size,
-            p2=self.patch_size,
-        )
-
-        # 7. Remove padding
-        if pad_r > 0 or pad_b > 0:
-            out = out[:, :, :h, :w]
-
-        return out + x
-
-    def forward(self, x):
-        if self.use_checkpoint and self.training:
-            return checkpoint.checkpoint(self.forward_impl, x, use_reentrant=False)
-        else:
-            return self.forward_impl(x)
+        # 3. Bidirectional Scanning
+        
+        # --- Forward Scan (Standard) ---
+        out_fwd = self.mamba_fwd(x_norm)
+        
+        # --- Backward Scan (Flip -> Scan -> Flip Back) ---
+        x_flip = torch.flip(x_norm, dims=[1]) # Reverse the sequence
+        out_bwd = self.mamba_bwd(x_flip)
+        out_bwd = torch.flip(out_bwd, dims=[1]) # Reverse back to original order
+        
+        # 4. Combine
+        # --- Learned Fusion (Better than Averaging) ---
+        
+        # Concatenate features: Shape becomes (B, L, 2*C)
+        combined = torch.cat([out_fwd, out_bwd], dim=-1)
+        
+        # Calculate a Gate (0 to 1) deciding flow importance
+        # "z" tells us how much to listen to the mixture
+        z = self.fusion_gate(combined)
+        
+        # Project back to original dimension
+        x_fused = self.fusion_linear(combined)
+        
+        # Gated Activation: This is very stable for Mamba
+        x_out = x_fused * z
+        
+        # 5. Reshape back to Image
+        x_out = x_out.transpose(1, 2).view(B, C, H, W)
+        
+        return residual + x_out
 
 
-class DownBlock(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_out,
-        attn=False,
-        time_embed_dim=256,
-        num_heads=4,
-        dim_head=32,
-        groups=8,
-        use_checkpoint=False,
-    ):
-        super().__init__()
-        self.res_block1 = ResNetBlock(
-            dim_in,
-            dim_out,
-            time_emb_dim=time_embed_dim,
-            groups=groups,
-            use_checkpoint=use_checkpoint,
-        )
-        self.res_block2 = ResNetBlock(
-            dim_out,
-            dim_out,
-            time_emb_dim=time_embed_dim,
-            groups=groups,
-            use_checkpoint=use_checkpoint,
-        )
-        self.attn = (
-            AttentionBlock(
-                dim_out,
-                heads=num_heads,
-                dim_head=dim_head,
-                groups=groups,
-                use_checkpoint=use_checkpoint,
-            )
-            if attn
-            else nn.Identity()
-        )
-
-        self.downsample = nn.Conv2d(
-            dim_out, dim_out, kernel_size=4, stride=2, padding=1
-        )
-
-    def forward(self, x, t_emb):
-        x = self.res_block1(x, t_emb)
-        x = self.attn(x)
-        x = self.res_block2(x, t_emb)
-
-        skip_feature = x
-        x = self.downsample(x)
-
-        return x, skip_feature
-
-
-class UpBlock(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_skip,
-        dim_out,
-        attn=False,
-        time_embed_dim=256,
-        num_heads=4,
-        dim_head=32,
-        groups=8,
-        use_checkpoint=False,
-    ):
-        super().__init__()
-        self.upsample = nn.Upsample(
-            scale_factor=2, mode="bilinear", align_corners=False
-        )
-        self.conv = nn.Conv2d(dim_in, dim_out, kernel_size=3, padding=1)
-
-        self.res_block1 = ResNetBlock(
-            dim_out + dim_skip,
-            dim_out,
-            time_emb_dim=time_embed_dim,
-            groups=groups,
-            use_checkpoint=use_checkpoint,
-        )
-        self.res_block2 = ResNetBlock(
-            dim_out,
-            dim_out,
-            time_emb_dim=time_embed_dim,
-            groups=groups,
-            use_checkpoint=use_checkpoint,
-        )
-        self.attn = (
-            AttentionBlock(
-                dim_out,
-                heads=num_heads,
-                dim_head=dim_head,
-                groups=groups,
-                use_checkpoint=use_checkpoint,
-            )
-            if attn
-            else nn.Identity()
-        )
-
-    def forward(self, x, time_embed, skip):
-        x = self.upsample(x)
-        x = self.conv(x)
-        # Add the SKip connection from the Down layers
-        x = torch.concatenate([x, skip], dim=1)
-        # print("After Concatenating: ", x.shape)
-        x = self.res_block1(x, time_embed)
-        x = self.attn(x)
-        x = self.res_block2(x, time_embed)
-
-        return x
-
-
-class UNet(nn.Module):
-    def __init__(
-        self, dim=64, channels=3, dim_mults=(1, 2, 4, 8), use_checkpoint=False
-    ):
-        super().__init__()
-        self.init_conv = nn.Conv2d(channels, dim, kernel_size=7, padding=3)
-        self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(dim),
-            nn.Linear(dim, dim * 4),
-            nn.GELU(),
-            nn.Linear(dim * 4, 256),
-        )
-
-        list_dims = [dim * m for m in dim_mults]
-        list_dims = [dim] + list_dims
-        in_out = list(zip(list_dims[:-1], list_dims[1:]))
-
-        self.downs = nn.ModuleList([])
-        self.ups = nn.ModuleList([])
-        for i, (d_in, d_out) in enumerate(in_out):
-            use_attn = i >= 2
-            self.downs.append(
-                DownBlock(d_in, d_out, attn=use_attn, use_checkpoint=use_checkpoint)
-            )
-
-        self.mid_block1 = ResNetBlock(
-            list_dims[-1],
-            list_dims[-1],
-            time_emb_dim=256,
-            use_checkpoint=use_checkpoint,
-        )
-        self.mid_attn = AttentionBlock(list_dims[-1], use_checkpoint=use_checkpoint)
-        self.mid_block2 = ResNetBlock(
-            list_dims[-1],
-            list_dims[-1],
-            time_emb_dim=256,
-            use_checkpoint=use_checkpoint,
-        )
-        reversed_dim = list(reversed(list_dims))
-        up_in_out = list(zip(reversed_dim[:-1], reversed_dim[1:]))
-
-        for i, (d_in, d_out) in enumerate(up_in_out):
-            use_attn = i < 2
-            self.ups.append(
-                UpBlock(
-                    d_in,
-                    d_in,
-                    d_out,
-                    attn=use_attn,
-                    use_checkpoint=use_checkpoint,
-                )
-            )
-
-        self.final_conv = nn.Sequential(
-            ResNetBlock(dim, dim, use_checkpoint=use_checkpoint),
-            nn.Conv2d(dim, channels, kernel_size=1),
-        )
-
-    def forward(self, x, t, profiler=None):
+class FM_PhysMamba_UNET(nn.Module):
+    def __init__(self, model_cfg_path="small", in_channels=3):
         """
         Args:
-        x: input of the haze image
-        t: Timeline
-
-        Returns: out: Clean image
+            model_cfg_path: "small", "large", or path to a .yaml file
         """
-        if profiler:
-            profiler.print_status("  [UNet] Start")
+        super().__init__()
+        
+        # 1. Load Config into CN
+        if isinstance(model_cfg_path, CN):
+            self.cfg = model_cfg_path # Already loaded
+        else:
+            self.cfg = get_model_config(model_cfg_path)
 
-        t_emb = self.time_mlp(t)
-        x = self.init_conv(x)
-        if profiler:
-            profiler.print_status("  [UNet] Init Conv")
+        # 2. Extract Params from CN
+        base_dim = self.cfg.BASE_DIM
+        dim_mults = self.cfg.DIM_MULTS
+        self.physics_guided = self.cfg.PHYSICS_GUIDED
+        enc_blocks_list = self.cfg.ENCODER_BLOCKS
+        dec_blocks_list = self.cfg.DECODER_BLOCKS
+        
+        self.dims = [base_dim * m for m in dim_mults]
+        
+        # --- Time Embedding ---
+        time_dim = base_dim * self.cfg.TIME_DIM_MULT
+        self.time_mlp = nn.Sequential(
+            nn.Linear(base_dim, time_dim),
+            nn.SiLU(),
+            nn.Linear(time_dim, time_dim),
+        )
 
-        skips = []
-        for i, down in enumerate(self.downs):
-            x, skip_feat = down(x, t_emb)
-            print(f"Index {i}:")
-            print(f"Shape of x is: {x.shape}")
-            print(f"Shape of skip_feature is: {skip_feat.shape}")
-            skips.append(skip_feat)
-            if profiler:
-                profiler.print_status(f"  [UNet] Down {i}")
+        self.down_time_projs = nn.ModuleList()
+        self.up_time_projs = nn.ModuleList()
 
-        x = self.mid_block1(x, t_emb)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, t_emb)
-        if profiler:
-            profiler.print_status("  [UNet] Mid Block")
+        # --- ENCODER ---
+        self.init_conv = nn.Conv2d(in_channels, self.dims[0], 3, 1, 1)
+        
+        self.downs = nn.ModuleList()       # Processing Blocks
+        self.downsamples = nn.ModuleList() # Downsampling Layers (Separated)
+        
+        for i in range(len(self.dims)-1):
+            dim_in, dim_out = self.dims[i], self.dims[i+1]
+            self.down_time_projs.append(nn.Linear(time_dim, dim_in * 2))
 
-        skips = skips[::-1]
-        print("\nStart UpConvolution")
-        for up in self.ups:
-            skip = skips.pop(0)
-            print(f"Shape of x is: {x.shape}")
-            print(f"Shape of skip_feature is: {skip.shape}")
-            x = up(x, t_emb, skip)
-            if profiler:
-                profiler.print_status(f"  [UNet] Up {i}")
-            # print("-------------")
+            # Build Processing Stack
+            blocks = []
+            blocks.append(PhysConvNeXtBlock(dim_in)) # Always start with Conv
+            
+            # Add specified number of Mamba blocks
+            num_mamba = enc_blocks_list[i] if i < len(enc_blocks_list) else 1
+            for _ in range(num_mamba):
+                blocks.append(PhysBiMambaBlock(dim_in))
+            
+            self.downs.append(nn.Sequential(*blocks))
 
-        out = self.final_conv(x)
-        if profiler:
-            profiler.print_status("  [UNet] End")
-        return out
+            # Separate Downsampling Layer
+            self.downsamples.append(nn.Conv2d(dim_in, dim_out, 4, 2, 1)) 
+
+        # --- BOTTLENECK ---
+        mid_dim = self.dims[-1]
+        self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
+        
+        self.mid_block1 = PhysBiMambaBlock(mid_dim)
+        self.mid_block2 = PhysBiMambaBlock(mid_dim)
+        
+        # Physics Head A
+        self.atm_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), nn.Flatten(),
+            nn.Linear(mid_dim, 64), nn.SiLU(),
+            nn.Linear(64, 3), nn.Sigmoid() 
+        )
+
+        # --- DECODER ---
+        self.ups = nn.ModuleList()
+        # Iterate backwards
+        for idx, i in enumerate(range(len(self.dims)-2, -1, -1)):
+            dim_in, dim_out = self.dims[i+1], self.dims[i]
+            self.up_time_projs.append(nn.Linear(time_dim, dim_out * 2))
+            
+            layers = []
+            layers.append(nn.ConvTranspose2d(dim_in, dim_out, 2, 2)) # Upsample
+            layers.append(nn.Conv2d(dim_out*2, dim_out, 1)) # Reduce concatenated channels
+            
+            # Stack Blocks
+            num_mamba = dec_blocks_list[i] if i < len(dec_blocks_list) else 1
+            for _ in range(num_mamba):
+                if i > 0: # Deeper layers = Mamba
+                    layers.append(PhysBiMambaBlock(dim_out))
+                else: # Shallow layers = Conv
+                    layers.append(PhysConvNeXtBlock(dim_out))
+            
+            layers.append(PhysConvNeXtBlock(dim_out)) 
+            self.ups.append(nn.Sequential(*layers))
+
+        # Physics Head T
+        self.trans_head = nn.Sequential(
+            nn.Conv2d(self.dims[0], 16, 3, 1, 1), nn.SiLU(),
+            nn.Conv2d(16, 1, 1), nn.Sigmoid() 
+        )
+        
+        self.final_conv = nn.Conv2d(self.dims[0], 3, 1)
+
+    def get_sinusoidal_emb(self, t, device):
+        half_dim = self.dims[0] // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+    def forward(self, x, t):
+        t_emb_raw = self.get_sinusoidal_emb(t, x.device) 
+        t_vec = self.time_mlp(t_emb_raw)
+        
+        h = self.init_conv(x)
+        skips = [] # Initialize empty list, NOT [h]
+        
+        # --- ENCODER ---
+        # Zip allows us to iterate Processing and Downsampling in sync
+        for i, (block_stack, down_layer) in enumerate(zip(self.downs, self.downsamples)):
+            t_emb = self.down_time_projs[i](t_vec)
+            
+            # 1. Process Features
+            for layer in block_stack:
+                if isinstance(layer, (PhysConvNeXtBlock, PhysBiMambaBlock)):
+                    h = layer(h, t_emb)
+                else:
+                    h = layer(h)
+            
+            # 2. SAVE Skip Connection (Before Downsampling!)
+            skips.append(h)
+            
+            # 3. Downsample
+            h = down_layer(h)
+            
+        # --- BOTTLENECK ---
+        t_emb_mid = self.mid_time_proj(t_vec)
+        h = self.mid_block1(h, t_emb_mid)
+        h = self.mid_block2(h, t_emb_mid)
+        
+        A_pred = self.atm_head(h).view(-1, 3, 1, 1)
+        
+        # --- DECODER ---
+        for i, block_stack in enumerate(self.ups):
+            # 1. Upsample
+            h = block_stack[0](h) 
+            
+            # 2. Retrieve Skip Connection
+            if len(skips) > 0:
+                skip = skips.pop()
+                # Concatenate (skip is High Res, h is High Res)
+                h = torch.cat([h, skip], dim=1)
+            else:
+                # Fallback if dimensions don't align perfectly (shouldn't happen with correct config)
+                pass
+
+            # 3. Reduce Channels
+            h = block_stack[1](h) 
+            
+            t_emb = self.up_time_projs[i](t_vec)
+            
+            # 4. Process Decoder Blocks
+            for layer in block_stack[2:]:
+                if isinstance(layer, (PhysConvNeXtBlock, PhysBiMambaBlock)):
+                    h = layer(h, t_emb)
+                else:
+                    h = layer(h)
+                    
+        t_map = self.trans_head(h)
+        if self.physics_guided:
+            h = h * (1 + t_map)
+        v_pred = self.final_conv(h)
+        
+        return v_pred, t_map, A_pred

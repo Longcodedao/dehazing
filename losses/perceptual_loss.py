@@ -2,126 +2,71 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.models as models
-import json
-
 
 class PerceptualLoss(nn.Module):
-    def __init__(
-        self,
-        vgg16_config_path,+
-        vgg_backbone="VGG16",
-        content_layers=["relu3_3"],
-        style_layers=["relu1_2", "relu2_2", "relu3_3", "relu4_3"],
-        resize=False,
-    ):
+    """
+    Computes Perceptual (Content) Loss using a frozen VGG16.
+    
+    CHANGES FROM ORIGINAL:
+    1. Removed Style Loss (Gram Matrices) - unnecessary for Dehazing.
+    2. Removed JSON dependency - hardcoded standard layers for stability.
+    3. Added automatic input normalization.
+    """
+    def __init__(self, layer_indices = None):
         super().__init__()
+        
+        # Standard VGG16 Layers for Content Loss in Restoration:
+        # relu1_2 (index 3), relu2_2 (index 8), relu3_3 (index 15), relu4_3 (index 22)
+        if layer_indices is None:
+            layer_indices = [3, 8, 15, 22]
 
-        self.resize = resize
-        if vgg_backbone == "VGG16":
-            backbone = models.vgg16(
-                weights=models.VGG16_Weights.IMAGENET1K_V1
-            ).features.eval()
-        elif vgg_backbone == "VGG19":
-            backbone = models.vgg19(
-                weights=models.VGG19_Weights.IMAGENET1K_V1
-            ).features.eval()
-        else:
-            raise ValueError("Only support backbone 'VGG16' and 'VGG19'.")
+        self.layer_indices = set(layer_indices)
 
-        with open(vgg16_config_path, "r") as f:
-            vgg_config = json.load(f)
+        # Load VGG16 Backbone
+        vgg = models.vgg16(weights = models.VGG16_Weights.IMAGENET1K_V1).features 
+        vgg.eval()
 
-        self.content_layers_idx = [vgg_config[layer] for layer in content_layers]
-        self.style_layers_idx = [vgg_config[layer] for layer in style_layers]
+        # Freeze parameters (we don't train VGG)
+        for param in vgg.parameters():
+            param.requires_grad = False 
 
-        max_index = max(self.content_layers_idx + self.style_layers_idx)
-        self.backbone = backbone[: max_index + 1]
+        # Extract only the layers we need to save memory
+        # We slice up to the max index we need
+        max_idx = max(layer_indices)
+        self.vgg_layers = vgg[:max_idx + 1]
 
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+        # ImageNet Normalizationo Constants 
+        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
 
-        self.register_buffer(
-            "mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
-        )
-        self.register_buffer(
-            "std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-        )
-
-    def extract_features(self, x):
-        # Safety Reason: Clamp the image to the range from [-1, 1]
-        x = torch.clamp(x, -1.0, 1.0)
-
-        # Normalize back to the range [0, 1]: VGG model expects that
-        # Only shift if the input is likely [-1, 1]
+    def normalize(self, x):
+        """
+        Normalize inputs to the range and stats VGG expects.
+        Assumes input x is in range [0, 1] or [-1, 1].
+        """
+        # If the range of input is [-1, 1] convert to [0, 1]
         if x.min() < 0:
-            x = (x + 1.0) / 2
+             x = (x + 1.0) / 2.0
 
-        x = (x - self.mean) / self.std
-        # Optional but recommended for changing the input to 224x224
-        # if the size of the image is less than 224 (deep features might vanishes)
-        if self.resize and x.shape[-1] < 224:
-            x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+        # Normalize with ImageNet mean/std
+        return (x - self.mean) / self.std
 
-        features = {}
-
-        for name, layer in self.backbone.named_children():
+    def forward(self, pred, target):
+        # 1 Normalize
+        pred_norm = self.normalize(pred)
+        target_norm = self.normalize(target)
+        
+        loss = 0.0
+        x = pred_norm
+        y = target_norm
+        
+        # 2. Pass through layers and accumulate loss
+        for i, layer in enumerate(self.vgg_layers):
             x = layer(x)
-            index = int(name)
-
-            if index in self.content_layers_idx:
-                features[f"content_{index}"] = x
-
-            if index in self.style_layers_idx:
-                features[f"style_{index}"] = x
-
-        return features
-
-    def gram_matrix(self, x):
-        _, c, h, w = x.shape
-
-        # Try safer approach for that
-        scale = torch.sqrt(torch.tensor(c * h * w, dtype=x.dtype, device=x.device))
-        x = x / scale
-
-        gram_matrix = torch.einsum("b c h w, b d h w -> b c d", x, x)
-        # gram_matrix = gram_matrix / (c * h * w)
-
-        return gram_matrix
-
-    def forward(
-        self, predict, target, content_weight=1.0, style_weight=1e5, display=True
-    ):
-        with torch.autocast(device_type=predict.device.type, enabled=False):
-            # Cast the inputs to Float32 manually
-            predict = predict.float()
-            target = target.float()
-
-            predict_feat = self.extract_features(predict)
-            target_feat = self.extract_features(target)
-
-            # Calculate the content loss (MSE)
-            loss_content = 0
-            for content_key in predict_feat:
-                if content_key.startswith("content"):
-                    loss_content += F.mse_loss(
-                        predict_feat[content_key], target_feat[content_key]
-                    )
-
-            # Calculate the style loss (MSE)
-            loss_style = 0
-            for style_key in predict_feat:
-                if style_key.startswith("style"):
-                    predict_gram = self.gram_matrix(predict_feat[style_key])
-                    target_gram = self.gram_matrix(target_feat[style_key])
-
-                    if display:
-                        print(f"[DEBUG] PREDICT GRAM Mean: {predict_gram.mean():.6e}")
-                        print(f"[DEBUG] TARGET GRAM Mean: {target_gram.mean():.6e}")
-
-                    mse_loss_gram = F.mse_loss(predict_gram, target_gram)
-                    loss_style += mse_loss_gram
-            if display:
-                print(f"[DEBUG] LOSS CONTENT: {loss_content.item():.4f}")
-                print(f"[DEBUG] LOSS STYLE  : {loss_style.item():.4f}")
-
-            return content_weight * loss_content + style_weight * loss_style
+            y = layer(y)
+            
+            if i in self.layer_indices:
+                # Use L1 loss for features (sharper than MSE)
+                loss += F.l1_loss(x, y)
+                
+        return loss

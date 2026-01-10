@@ -1,3 +1,4 @@
-from .unet import UNet 
+from .unet import FM_PhysMamba_UNET 
 from .flow_matching import path_sampler, ODESolver
-from .adversarial import Discriminator
+
+__all__ = ["FM_PhysMamba_UNET", "path_sampler", "ODESolver"]

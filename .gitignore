@@ -26,3 +26,4 @@ losses/.ipynb_checkpoints/
 losses/.ipynb_checkpoints/*
 
 .ipynb_checkpoints/
+__pycache__/

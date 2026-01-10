@@ -1,0 +1,7 @@
+VERSION: "large"
+BASE_DIM: 96
+DIM_MULTS: [1, 2, 4, 8]
+PHYSICS_GUIDED: True
+# Deeper network
+ENCODER_BLOCKS: [2, 2, 2]
+DECODER_BLOCKS: [2, 2, 2]

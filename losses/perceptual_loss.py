@@ -8,7 +8,7 @@ import json
 class PerceptualLoss(nn.Module):
     def __init__(
         self,
-        vgg16_config_path,
+        vgg16_config_path,+
         vgg_backbone="VGG16",
         content_layers=["relu3_3"],
         style_layers=["relu1_2", "relu2_2", "relu3_3", "relu4_3"],

@@ -1,10 +1,12 @@
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+from torchvision.utils import make_grid
 
 # --- Third Party Imports ---
 from torchmetrics import MetricCollection, MeanMetric 
@@ -23,7 +25,7 @@ from utils_ddp import is_main_process
 from utils import pad_to_multiple, unpad
 from model import ODESolver, path_sampler  # Ensure these exist in your model.py
 
-
+from scheduler import get_scheduler
 class DehazeTrainer:
     def __init__(self, cfg, model, criterion, local_rank):
         self.cfg = cfg
@@ -52,7 +54,7 @@ class DehazeTrainer:
         # Note: Access underlying model for inference/sampling using .module
         self.criterion = criterion.to(self.device)
         self.scalar = torch.amp.GradScaler(self.device)
-        self.ode_solver = ODESolver(self.model.module, nfe=10)
+        self.ode_solver = ODESolver(self.model.module)
         self.optimizer = optim.AdamW(
             self.model.parameters(), 
             lr=cfg.OPTIM.LR, 
@@ -61,6 +63,9 @@ class DehazeTrainer:
         self.scheduler = optim.lr_scheduler.StepLR(
             self.optimizer, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
         )
+
+        # --- Initialize Scheduler from external file ---
+        # self.scheduler = get_scheduler(self.optimizer, cfg)
         
         # Metrics
         self.train_metrics = MetricCollection({
@@ -93,6 +98,31 @@ class DehazeTrainer:
             console=self.console
         )
 
+    def _log_visuals(self, hazy, clean, pred, step):
+        """
+        Logs a comparison grid (Hazy | Pred | Clean) to TensorBoard.
+        Picks the first 4 images from the batch to keep logs clean.
+        """
+        if self.writer is None:
+            return
+
+        # 1. Limit to max 4 images to avoid cluttering TensorBoard
+        N = min(hazy.shape[0], 4)
+        hazy_sample = hazy[:N]
+        clean_sample = clean[:N]
+        pred_sample = pred[:N]
+
+        # 2. Concatenate images side-by-side: [Hazy, Pred, Clean]
+        # shape becomes: (N, C, H, W*3)
+        combined = torch.cat([hazy_sample, pred_sample, clean_sample], dim=3)
+
+        # 3. Create a vertical grid of these horizontal strips
+        # nrow=1 ensures they are stacked vertically
+        grid = make_grid(combined, nrow=1, padding=10, pad_value=1.0, normalize=False)
+
+        # 4. Log
+        self.writer.add_image("Validation_Samples/Hazy_Vs_Pred_Vs_Clean", grid, step)
+
 
     def load_checkpoint(self, path):
         if not os.path.exists(path):
@@ -102,7 +132,7 @@ class DehazeTrainer:
         
         # Map to current device to avoid OOM 
         map_location = {"cuda:0": f"cuda:{self.local_rank}"}
-        checkpoint = torch.load(path, map_location=map_location)
+        checkpoint = torch.load(path, map_location=map_location, weights_only=False)
         
         # Handle cases where checkpoint might or might not have 'module.' prefix
         state_dict = checkpoint["model"]
@@ -115,9 +145,14 @@ class DehazeTrainer:
         # Load Optimizer & Scheduler
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
+            
+        # Robust Scheduler Loading
         if "scheduler" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
-        
+            try:
+                self.scheduler.load_state_dict(checkpoint["scheduler"])
+            except Exception as e:
+                if is_main_process():
+                    self.console.print(f"[bold yellow]Warning: Scheduler architecture mismatch. Resetting scheduler.\nError: {e}[/]")        
         # Load Epoch
         self.epoch = checkpoint.get("epoch", 0) + 1
         
@@ -219,7 +254,9 @@ class DehazeTrainer:
             task_id = progress.add_task(f"Epoch {self.epoch} [Eval]", 
                                         total=len(loader), info="Sampling...")
 
-        for batch in loader:
+            target_log_batch = random.randint(0, len(loader) - 1)
+
+        for batch_idx, batch in enumerate(loader):
             clean_img, hazy_img = batch
             clean_img = clean_img.to(self.device, non_blocking=True)
             hazy_img = hazy_img.to(self.device, non_blocking=True)
@@ -241,7 +278,10 @@ class DehazeTrainer:
             
             # 5. Update Metrics (Now shapes match: BxCxHxW)
             self.eval_metrics.update(pred_clean, clean_img)
-            
+
+            if is_main_process() and batch_idx == target_log_batch:
+                self._log_visuals(hazy_img, clean_img, pred_clean, self.epoch)
+                
             if is_main_process():
                 progress.update(task_id, advance=1, info="")
         
@@ -291,6 +331,7 @@ class DehazeTrainer:
                     table.add_row("Loss Total", 
                                   f"{train_res['Loss_Total'].item():.4f}")
                     table.add_row("PSNR", f"{val_res['PSNR'].item():.2f}")
+                    table.add_row("SSIM", f"{val_res['SSIM'].item():.2f}")
                     self.console.print(table)
 
                     # Save Best

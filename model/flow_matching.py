@@ -19,10 +19,9 @@ def path_sampler(x0, x1, t):
 
 
 class ODESolver:
-    def __init__(self, model, nfe=20):
+    def __init__(self, model):
         self.model = model
-        self.nfe = nfe
-
+        
     def ode_func(self, t, x):
         t = t.expand(x.size(0))
         # Model returns (v, t_map, A), we only need v for integration
@@ -30,8 +29,8 @@ class ODESolver:
         return v_pred
 
     @torch.no_grad()
-    def sample(self, x_init):
-        t_span = torch.linspace(0, 1, self.nfe, device=x_init.device)
+    def sample(self, x_init, nfe = 20):
+        t_span = torch.linspace(0, 1, nfe, device=x_init.device)
         
         solution = odeint(
             self.ode_func, x_init, t_span, rtol=1e-4, atol=1e-4, method="euler"

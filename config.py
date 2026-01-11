@@ -27,10 +27,11 @@ _C.TRAIN = CN()
 _C.TRAIN.BATCH_SIZE = 16
 _C.TRAIN.EPOCHS = 100
 _C.TRAIN.RESUME_PATH = ""
+_C.TRAIN.PATIENCE: 5 
 
 # --- Optimization ---
 _C.OPTIM = CN()
-_C.OPTIM.LR = 2e-4
+_C.OPTIM.LR = 5e-4
 _C.OPTIM.WEIGHT_DECAY = 1e-4
 _C.OPTIM.BETA1 = 0.9
 _C.OPTIM.BETA2 = 0.999
@@ -39,6 +40,7 @@ _C.OPTIM.BETA2 = 0.999
 _C.SCHEDULER = CN()
 _C.SCHEDULER.STEP_SIZE = 50 
 _C.SCHEDULER.GAMMA = 0.5 
+_C.SCHEDULER.WARMUP_EPOCHS = 10
 
 # --- Loss Weights ---
 _C.LOSS = CN()
@@ -50,7 +52,7 @@ _C.LOSS.W_ATM = 0.01
 
 # --- Evaluation ---
 _C.EVAL = CN()
-_C.EVAL.EVAL_INTERVAL = 5
+_C.EVAL.EVAL_INTERVAL = 1
 _C.EVAL.BATCH_SIZE = 16 
 
 # --- Progressive Training Schedule ---

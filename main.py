@@ -106,7 +106,7 @@ if __name__ == "__main__":
     
     # 4. Trainer
     trainer = DehazeTrainer(cfg, model, criterion, local_rank)
-
+    
     # 5. Log Config to TensorBoard
     if is_main_process() and trainer.writer is not None:
         cfg_str = yaml.dump(convert_cfg_to_dict(cfg), sort_keys=False)
@@ -172,7 +172,7 @@ if __name__ == "__main__":
             train_loader, 
             val_loader, 
             max_epochs=cumulative_target_epoch, 
-            save_dir=os.path.join(cfg.LOG_DIR, f"stage_{stage_idx}_res{res}")
+            save_dir=os.path.join(cfg.CHECKPOINT_DIR, f"stage_{stage_idx}_res{res}")
         )
         
         # --- C. Checkpoint Stage ---

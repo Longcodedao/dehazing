@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=1 main.py \
+torchrun --nproc_per_node=2 main.py \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \

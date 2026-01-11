@@ -1,12 +1,19 @@
-torchrun --nproc_per_node=2 main.py \
+torchrun --nproc_per_node=1 main.py \
+  --model-config "small" \
+  --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
+  --dataset_root "dataset" \
+  --dataset_name "RESIDE" \
+  --log_dir "logs/FM_PhysicMamba_UNET_DDP" \
+  --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_DDP" \
+  --num_workers 4
+
+python3 main.py \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
   --dataset_name "RESIDE" \
   --log_dir "logs/FM_PhysicMamba_UNET" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET" \
-  --resume "checkpoints/FM_PhysicMamba_UNET/stage_0_res256/latest.pt" \
-    --num_workers 4
-    
+  --num_workers 4
     
 NEXT JOB: Change the augmentation in the Val Transform to not include Resize in that and try to hold the original resolution as much as possible (Using padding to get the shape to be multiple of 16)

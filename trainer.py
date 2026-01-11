@@ -21,40 +21,61 @@ from rich.table import Table
 from rich.panel import Panel
 
 # --- Local Application Imports ---
+# Assuming these exist in your project structure
 from utils_ddp import is_main_process
 from utils import pad_to_multiple, unpad
-from model import ODESolver, path_sampler  # Ensure these exist in your model.py
+from model import ODESolver, path_sampler 
 
-from scheduler import get_scheduler
 class DehazeTrainer:
     def __init__(self, cfg, model, criterion, local_rank):
         self.cfg = cfg
         self.local_rank = local_rank 
-        self.device = torch.device(f"cuda:{local_rank}")
         
-        # Setup Rich Console (Only on Main Process)
+        # 1. Detect Distributed Status
+        # We check if torch.distributed is initialized. 
+        # If running via "python main.py", this is usually False.
+        # If running via "torchrun ...", this is True.
+        self.is_distributed = dist.is_available() and dist.is_initialized()
+        self.world_size = dist.get_world_size() if self.is_distributed else 1
+        
+        # 2. Setup Device
+        if self.is_distributed:
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            # Fallback for single GPU debugging
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # 3. Setup Console (Only on Main Process)
+        # In single GPU, local_rank is usually 0, so this works.
         self.console = Console() if is_main_process() else None
-         
+          
         # --- Model setup ---
         self.model = model.to(self.device)
         
-        if dist.get_world_size() > 1:
+        # 4. Conditional DDP Wrapping
+        if self.is_distributed:
             self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+            self.model = DDP(
+                self.model, 
+                device_ids=[local_rank],
+                output_device=local_rank,
+                # Set find_unused_parameters=True if your model has conditional branches
+                # that might not execute every forward pass.
+                find_unused_parameters=False 
+            )
+            if is_main_process():
+                self.console.print(Panel(f"[bold green]DDP Initialized (Rank {local_rank})[/]", title="System"))
+        else:
+            if is_main_process():
+                self.console.print(Panel(f"[bold yellow]Single GPU Mode (No DDP)[/]", title="System"))
         
-        self.model = DDP(
-        self.model, 
-             device_ids = [local_rank],
-             output_device = local_rank, 
-             find_unused_parameters = False
-        )
-        
-        if is_main_process():
-            self.console.print(Panel(f"[bold green]Model initialized on {self.device}[/]", title="System"))
-            
-        # Note: Access underlying model for inference/sampling using .module
+        # 5. Initialize Solver
+        # We pass self.raw_model (see property below) so the solver gets the actual UNet, 
+        # not the DDP wrapper.
         self.criterion = criterion.to(self.device)
         self.scalar = torch.amp.GradScaler(self.device)
-        self.ode_solver = ODESolver(self.model.module)
+        self.ode_solver = ODESolver(self.raw_model)
+        
         self.optimizer = optim.AdamW(
             self.model.parameters(), 
             lr=cfg.OPTIM.LR, 
@@ -64,9 +85,6 @@ class DehazeTrainer:
             self.optimizer, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
         )
 
-        # --- Initialize Scheduler from external file ---
-        # self.scheduler = get_scheduler(self.optimizer, cfg)
-        
         # Metrics
         self.train_metrics = MetricCollection({
             "Loss_Total": MeanMetric(),
@@ -84,9 +102,17 @@ class DehazeTrainer:
         self.writer = SummaryWriter(log_dir=cfg.LOG_DIR) if is_main_process() else None
         self.epoch = 1
 
-    
+    @property
+    def raw_model(self):
+        """
+        Returns the underlying model regardless of whether DDP is used.
+        This fixes the 'module' attribute error on single GPU.
+        """
+        if hasattr(self.model, "module"):
+            return self.model.module
+        return self.model
+
     def _get_progress_bar(self):
-        """Returns a configured Rich Progress Bar instance."""
         return Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
@@ -94,35 +120,17 @@ class DehazeTrainer:
             TaskProgressColumn(),
             MofNCompleteColumn(),
             TimeRemainingColumn(),
-            TextColumn("[bold yellow]{task.fields[info]}"), # Custom field for metrics
+            TextColumn("[bold yellow]{task.fields[info]}"),
             console=self.console
         )
 
     def _log_visuals(self, hazy, clean, pred, step):
-        """
-        Logs a comparison grid (Hazy | Pred | Clean) to TensorBoard.
-        Picks the first 4 images from the batch to keep logs clean.
-        """
         if self.writer is None:
             return
-
-        # 1. Limit to max 4 images to avoid cluttering TensorBoard
         N = min(hazy.shape[0], 4)
-        hazy_sample = hazy[:N]
-        clean_sample = clean[:N]
-        pred_sample = pred[:N]
-
-        # 2. Concatenate images side-by-side: [Hazy, Pred, Clean]
-        # shape becomes: (N, C, H, W*3)
-        combined = torch.cat([hazy_sample, pred_sample, clean_sample], dim=3)
-
-        # 3. Create a vertical grid of these horizontal strips
-        # nrow=1 ensures they are stacked vertically
+        combined = torch.cat([hazy[:N], pred[:N], clean[:N]], dim=3)
         grid = make_grid(combined, nrow=1, padding=10, pad_value=1.0, normalize=False)
-
-        # 4. Log
         self.writer.add_image("Validation_Samples/Hazy_Vs_Pred_Vs_Clean", grid, step)
-
 
     def load_checkpoint(self, path):
         if not os.path.exists(path):
@@ -130,78 +138,77 @@ class DehazeTrainer:
                 self.console.print(f"[bold red]!! Checkpoint not found at: {path}[/]")
             return False
         
-        # Map to current device to avoid OOM 
-        map_location = {"cuda:0": f"cuda:{self.local_rank}"}
+        map_location = {"cuda:0": f"cuda:{self.local_rank}"} if self.is_distributed else self.device
         checkpoint = torch.load(path, map_location=map_location, weights_only=False)
         
-        # Handle cases where checkpoint might or might not have 'module.' prefix
         state_dict = checkpoint["model"]
-        # If loading a non-DDP checkpoint into DDP, add 'module.' prefix
-        if not list(state_dict.keys())[0].startswith("module."):
+        
+        # Flexible loading: Handle 'module.' prefix mismatch
+        # If checkpoint has 'module.' but current model doesn't (Single GPU): Remove it
+        # If checkpoint lacks 'module.' but current model has it (DDP): Add it
+        has_module_ckpt = list(state_dict.keys())[0].startswith("module.")
+        is_ddp_model = hasattr(self.model, "module")
+        
+        if has_module_ckpt and not is_ddp_model:
+            state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        elif not has_module_ckpt and is_ddp_model:
             state_dict = {f"module.{k}": v for k, v in state_dict.items()}
         
         self.model.load_state_dict(state_dict, strict=True)
         
-        # Load Optimizer & Scheduler
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
-            
-        # Robust Scheduler Loading
         if "scheduler" in checkpoint:
             try:
                 self.scheduler.load_state_dict(checkpoint["scheduler"])
             except Exception as e:
                 if is_main_process():
-                    self.console.print(f"[bold yellow]Warning: Scheduler architecture mismatch. Resetting scheduler.\nError: {e}[/]")        
-        # Load Epoch
+                     self.console.print(f"[bold yellow]Scheduler mismatch. Resetting. {e}[/]")
+
         self.epoch = checkpoint.get("epoch", 0) + 1
         
         if is_main_process():
             self.console.print(f"[bold green]✓ Resumed from Epoch {self.epoch}[/]")
-        
         return True
 
     def save_checkpoint(self, path, is_best=False):
         if not is_main_process(): 
             return
         
+        # Use self.raw_model to save clean weights without "module." prefix if desired,
+        # OR keep standard DDP saving. Here we save exactly what is in self.raw_model
+        # to ensure the checkpoint is portable to single GPU inference easily.
         ckpt = {
             "epoch": self.epoch,
-            "model": self.model.module.state_dict(),
+            "model": self.raw_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "config": self.cfg,
         }
         
         torch.save(ckpt, path)
-        
-        if not is_best: # Only print for regular saves to avoid spam
+        if not is_best:
             self.console.print(f"[dim]Saved checkpoint: {os.path.basename(path)}[/]")
 
     def train_epoch(self, loader):
         self.model.train()
         self.train_metrics.reset()
         
-        if hasattr(loader, "sampler") and \
-            isinstance(loader.sampler, torch.utils.data.DistributedSampler):
+        # FIX: Only set epoch if using DistributedSampler
+        if self.is_distributed and hasattr(loader.sampler, "set_epoch"):
             loader.sampler.set_epoch(self.epoch)
 
-        # Only Main Process manages the Progress Bar
         progress = self._get_progress_bar() if is_main_process() else None
         
-        # This context manager handles the display
-        # We wrap the iterator so we can use 'batch' normally
         if is_main_process():
             progress.start()
-            task_id = progress.add_task(f"Epoch {self.epoch} [Train]", 
-                                        total=len(loader), info="Init...")
+            task_id = progress.add_task(f"Epoch {self.epoch} [Train]", total=len(loader), info="Init...")
         
         for batch in loader:
             clean_img, hazy_img = batch
             clean_img = clean_img.to(self.device, non_blocking=True)
             hazy_img = hazy_img.to(self.device, non_blocking=True)
             
-            # --- Flow Matching ---
             t = torch.rand(clean_img.shape[0], device=self.device)
             x_t, target_v = path_sampler(hazy_img, clean_img, t)
 
@@ -210,73 +217,53 @@ class DehazeTrainer:
             with torch.amp.autocast("cuda"):
                 preds = self.model(x_t, t)
                 loss, loss_dict = self.criterion(
-                    preds, 
-                    target_v = target_v,
-                    x_t = x_t, 
-                    timestep = t,
-                    clean_img = clean_img, 
-                    hazy_img = hazy_img
+                    preds, target_v=target_v, x_t=x_t, timestep=t,
+                    clean_img=clean_img, hazy_img=hazy_img
                 )
 
             self.scalar.scale(loss).backward()
             self.scalar.step(self.optimizer)
             self.scalar.update()
 
-            # --- Metrics & Display ---
             self.train_metrics["Loss_Total"].update(loss.detach())
             self.train_metrics["Loss_Flow"].update(loss_dict["Flow"])
             self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
             self.train_metrics["Loss_VGG"].update(loss_dict["VGG"])
 
             if is_main_process():
-                # Update the custom 'info' field in the progress bar
-                progress.update(task_id, advance=1, 
-                        info=f"L: {loss.item():.4f} | F: {loss_dict['Flow']:.4f}")
+                progress.update(task_id, advance=1, info=f"L: {loss.item():.4f}")
 
         if is_main_process():
             progress.stop()
 
         self.scheduler.step()
-        
-        # Return final computed metrics
         return self.train_metrics.compute()
 
-        
     @torch.no_grad()
     def eval_epoch(self, loader):
         self.model.eval()
         self.eval_metrics.reset()
         
         progress = self._get_progress_bar() if is_main_process() else None
-
         if is_main_process():
             progress.start()
-            task_id = progress.add_task(f"Epoch {self.epoch} [Eval]", 
-                                        total=len(loader), info="Sampling...")
-
+            task_id = progress.add_task(f"Epoch {self.epoch} [Eval]", total=len(loader), info="Sampling...")
             target_log_batch = random.randint(0, len(loader) - 1)
 
         for batch_idx, batch in enumerate(loader):
             clean_img, hazy_img = batch
             clean_img = clean_img.to(self.device, non_blocking=True)
             hazy_img = hazy_img.to(self.device, non_blocking=True)
-        
-            # 1. Pad to multiple of 16 (Required for UNet/Mamba architectures)
+            
             hazy_padded, pad_h, pad_w = pad_to_multiple(hazy_img, multiple=16)
             
             with torch.amp.autocast("cuda"):
-                # 2. Inference using the ODE Solver (on PADDED image)
-                # nfe=5 is a good trade-off for speed during validation
+                # Use ode_solver which uses self.raw_model internally
                 pred_padded = self.ode_solver.sample(hazy_padded, nfe=5) 
             
-            # 3. Unpad the result (Critical Step!)
-            # Crop the prediction back to the original size of 'clean_img'
             pred_clean = unpad(pred_padded, pad_h, pad_w)
-        
-            # 4. Clamp to valid image range
             pred_clean = torch.clamp(pred_clean, 0.0, 1.0)
             
-            # 5. Update Metrics (Now shapes match: BxCxHxW)
             self.eval_metrics.update(pred_clean, clean_img)
 
             if is_main_process() and batch_idx == target_log_batch:
@@ -290,51 +277,38 @@ class DehazeTrainer:
         
         return self.eval_metrics.compute()
 
-    def fit(self, train_loader, val_loader, max_epochs,save_dir):
-        """
-        Args:
-            max_epochs: The cumulative epoch number to stop at. 
-                        (e.g., if current is 50 and max is 100, it trains for 50 epochs).
-        """
+    def fit(self, train_loader, val_loader, max_epochs, save_dir):
         if is_main_process():
             os.makedirs(save_dir, exist_ok=True)
             self.console.print(f"[bold]Training from Epoch {self.epoch} to {max_epochs}[/bold]")
 
         best_psnr = 0.0
         
-        # Loop runs until we hit max_epochs
         for epoch in range(self.epoch, max_epochs + 1):
             self.epoch = epoch
             
             # 1. Train
             train_res = self.train_epoch(train_loader)
             
-            # Log Train
             if is_main_process():
                 for k, v in train_res.items(): 
                     self.writer.add_scalar(f"Train/{k}", v, epoch)
 
-            # 2. Eval (Check config for interval, or force eval on last epoch)
-            # You might want to pass eval_interval from the stage config if needed
+            # 2. Eval
             if epoch % self.cfg.EVAL.EVAL_INTERVAL == 0 or epoch == max_epochs:
                 val_res = self.eval_epoch(val_loader)
                 
                 if is_main_process():
-                    # Log Eval
                     self.writer.add_scalar("Eval/PSNR", val_res['PSNR'], epoch)
                     self.writer.add_scalar("Eval/SSIM", val_res['SSIM'], epoch)
                     
-                    # Print Table
                     table = Table(title=f"Epoch {epoch} Results")
                     table.add_column("Metric", style="magenta")
                     table.add_column("Value", style="green")
-                    table.add_row("Loss Total", 
-                                  f"{train_res['Loss_Total'].item():.4f}")
+                    table.add_row("Loss Total", f"{train_res['Loss_Total'].item():.4f}")
                     table.add_row("PSNR", f"{val_res['PSNR'].item():.2f}")
-                    table.add_row("SSIM", f"{val_res['SSIM'].item():.2f}")
                     self.console.print(table)
 
-                    # Save Best
                     if val_res['PSNR'].item() > best_psnr:
                         best_psnr = val_res['PSNR'].item()
                         self.save_checkpoint(os.path.join(save_dir, "best.pt"), is_best=True)
@@ -342,5 +316,7 @@ class DehazeTrainer:
             # 3. Save Latest
             self.save_checkpoint(os.path.join(save_dir, "latest.pt"))
             
-            dist.barrier()
-
+            # FIX: Only barrier if distributed. 
+            # This prevents the deadlock on single GPU.
+            if self.is_distributed:
+                dist.barrier()

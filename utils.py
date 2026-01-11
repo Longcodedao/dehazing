@@ -2,16 +2,19 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from yacs.config import CfgNode as CN
 import os
 
 # Import your datasets and transforms
-from data import RESIDE_Indoor, RESIDE_SOTS_Indoor
+# (Ensure these imports match your project structure)
+from data import RESIDE_Indoor, RESIDE_SOTS_Indoor, Haze4k_Dataset
 from data.utils import get_haze_transforms
 
 def convert_cfg_to_dict(cfg_node):
+    """Recursively converts a YACS CfgNode to a standard Python dict."""
     if not isinstance(cfg_node, CN):
         if isinstance(cfg_node, list):
             return [convert_cfg_to_dict(item) for item in cfg_node]
@@ -23,6 +26,7 @@ def convert_cfg_to_dict(cfg_node):
         return cfg_dict
 
 def set_seed(seed):
+    """Sets the seed for reproducibility across random, numpy, and torch."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -32,6 +36,7 @@ def set_seed(seed):
 def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
     """
     Creates DataLoaders for a specific training stage.
+    Automatically handles Single-GPU vs Distributed (DDP) logic.
     
     Args:
         dataset_name (str): Name of the dataset (e.g., 'RESIDE', 'HAZE4K').
@@ -41,10 +46,13 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
     """
     verbose = (rank == 0)
     data_cfg = cfg.DATA
+    
+    # Check if Distributed Processing is Initialized
+    is_distributed = dist.is_available() and dist.is_initialized()
 
     # 1. Train Transform (Resizes to 'resolution')
     train_transform = get_haze_transforms(
-        dataset_name="RESIDE",
+        dataset_name="RESIDE",  # Or pass dataset_name if logic differs per dataset
         resize_size=resolution,
         split="train",
         verbose=verbose, 
@@ -58,7 +66,7 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
         verbose=verbose,
     )
 
-    # --- 2. Instantiate Datasets Dynamically ---
+    # --- 3. Instantiate Datasets Dynamically ---
     if dataset_name == "RESIDE":
         # RESIDE has separate classes for Train (ITS/OTS) and Val (SOTS)
         train_dataset = RESIDE_Indoor(
@@ -87,15 +95,21 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
     else:
         raise ValueError(f"Dataset {dataset_name} not supported in get_loaders_for_stage")
         
-    # 4. Samplers
-    train_sampler = DistributedSampler(train_dataset, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
+    # --- 4. Samplers (Hybrid Logic) ---
+    if is_distributed:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+        shuffle_train = False # Sampler handles shuffle
+    else:
+        train_sampler = None
+        val_sampler = None
+        shuffle_train = True # Loader handles shuffle
 
-    # 5. Loaders
+    # --- 5. Loaders ---
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=False, # Sampler handles shuffle
+        shuffle=shuffle_train, 
         sampler=train_sampler,
         num_workers=cfg.NUM_WORKERS,
         pin_memory=cfg.PIN_MEMORY,

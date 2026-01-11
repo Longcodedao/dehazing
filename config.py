@@ -52,7 +52,8 @@ _C.LOSS.W_ATM = 0.01
 
 # --- Evaluation ---
 _C.EVAL = CN()
-_C.EVAL.EVAL_INTERVAL = 1
+_C.EVAL.EVAL_INTERVAL = 2
+# I always set batch size = 1 in eval batch size
 _C.EVAL.BATCH_SIZE = 16 
 
 # --- Progressive Training Schedule ---

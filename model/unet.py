@@ -182,13 +182,13 @@ class FM_PhysMamba_UNET(nn.Module):
         self.down_time_projs = nn.ModuleList()
         self.up_time_projs = nn.ModuleList()
 
-        # --- ENCODER ---
+        # --- ENCODER ---i
         self.init_conv = nn.Conv2d(in_channels, self.dims[0], 3, 1, 1)
         
         self.downs = nn.ModuleList()       # Processing Blocks
         self.downsamples = nn.ModuleList() # Downsampling Layers (Separated)
         
-        for i in range(len(self.dims)-1):
+        for i in range(len(self.dims) - 1):
             dim_in, dim_out = self.dims[i], self.dims[i+1]
             self.down_time_projs.append(nn.Linear(time_dim, dim_in * 2))
 

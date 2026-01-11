@@ -8,12 +8,15 @@ torchrun --nproc_per_node=2 main.py \
   --num_workers 4
 
 python3 main.py \
+  --seed 42 \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
   --dataset_name "RESIDE" \
   --log_dir "logs/FM_PhysicMamba_UNET" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET" \
-  --num_workers 4
+  --resume "checkpoints/FM_PhysicMamba_UNET/stage_0_res256/latest.pt" \
+  --num_workers 4 \
+  --gradient-checkpointing
     
 NEXT JOB: Change the augmentation in the Val Transform to not include Resize in that and try to hold the original resolution as much as possible (Using padding to get the shape to be multiple of 16)

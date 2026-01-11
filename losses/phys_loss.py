@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .charbonnier_loss import CharbonnierLoss
 from .perceptual_loss import PerceptualLoss
+from data.utils import restandardize_tensor
 
 class FM_PhysicalLoss(nn.Module):
     """
@@ -51,58 +52,60 @@ class FM_PhysicalLoss(nn.Module):
         Args:
             pred_tuple: (pred_v, t_map, A_pred) from Model
             target_v:   Ground Truth Velocity (Clean - Hazy)
-            x_t:        Current noisy intermediate image
-            timestep:   Scalar time (B,) for Flow Matching
-            clean_img:  Ground Truth Clean Image (Target J)
-            hazy_img:   Original Hazy Image (Input I) - REQUIRED for Phys Loss
+            x_t:        Current noisy intermediate image (Normalized [-1, 1])
+            timestep:   Scalar time (B,)
+            clean_img:  Ground Truth Clean Image (Normalized [-1, 1])
+            hazy_img:   Original Hazy Image (Normalized [-1, 1])
         """
         
         # Unpack predictions 
         pred_v, pred_t_map, pred_A = pred_tuple
 
-        # --- A. Velocity Loss (Flow Matching Core) --- 
-        # "Learn to move pixels from Hazy to Clean"
+        # --- A. Velocity Loss (Keep in Model Space [-1, 1]) --- 
+        # We generally don't un-normalize velocity; MSE on raw logits is fine.
         loss_v = F.mse_loss(pred_v, target_v) 
 
-        # --- B. RECONSTRUCTED IMAGE -- 
-        # 2. Reconstruct Estimated Clean Image for Perceptual Loss
-        # Formula: x_1 = x_t + (1 - t) * v_pred
-        # We need this because VGG expects an IMAGE, not a velocity vector.
+        # --- B. Reconstruction --- 
+        # 1. Get the raw reconstruction in Model Space [-1, 1]
         t_expand = timestep.view(-1, 1, 1, 1)
-        J_pred = x_t + (1 - t_expand) * pred_v
+        J_pred_raw = x_t + (1 - t_expand) * pred_v
 
-        # Clamp to ensure stability for VGG and Physics
-        J_pred = torch.clamp(J_pred, 0.0, 1.0)
+        # 2. UN-NORMALIZE EVERYTHING to Image Space [0, 1]
+        # This is where we fix the "Deep Fried" bug using your function.
+        # We must un-normalize the Prediction, the Clean Target, and the Hazy Input
+        # so they are all in the same [0, 1] color space for physics/VGG.
+        
+        J_pred_01 = restandardize_tensor(J_pred_raw)
+        clean_img_01 = restandardize_tensor(clean_img)
+        hazy_img_01 = restandardize_tensor(hazy_img)
 
-        # --- C. PERCEPTUAL LOSS (Visual Quality) ---
-        # "Make the reconstructed image J look like a natural image"
-        loss_percep = self.perceptual(J_pred, clean_img)
+        # --- C. Perceptual Loss (Visual Quality) ---
+        # VGG expects [0, 1] inputs.
+        loss_percep = self.perceptual(J_pred_01, clean_img_01)
 
         # --- D. Physics Consistency Loss ---
-        # "If we re-haze our estimated J using our predicted T and A, 
-        # do we get back the original hazy image?"
         # Physics Model: I = J * t + A * (1 - t)
+        # This equation ONLY works if 0=Black and 1=White.
         
-        # Ensure T and A are in valid ranges if model doesn't enforce it
-        # (Assuming model output is already Sigmoid-ed, otherwise uncomment below)
+        # Ensure T and A are valid [0, 1] if they aren't already
+        # (Uncomment these if your model outputs raw logits for T/A)
         # pred_t_map = torch.sigmoid(pred_t_map)
         # pred_A = torch.sigmoid(pred_A)
-        I_reconstructed = J_pred * pred_t_map  + pred_A * (1 - pred_t_map)
-        loss_phys = self.charbonnier(I_reconstructed, hazy_img)
+        
+        # Re-haze the estimated clean image
+        I_reconstructed = J_pred_01 * pred_t_map + pred_A * (1 - pred_t_map)
+        
+        # Compare against the un-normalized hazy image
+        loss_phys = self.charbonnier(I_reconstructed, hazy_img_01)
 
-        # --- E. REGULARIZERS ---
-        # 1. TV Loss: Smoothness for Transmission map
+        # --- E. Regularizers ---
         dy, dx = self.get_gradients(pred_t_map)
         loss_tv = torch.mean(torch.abs(dy)) + torch.mean(torch.abs(dx))
         
-        # 2. Atmosphere: Prevent impossible A values
-        # We penalize A being too dark (< 0.1) or oversaturated (> 1.0)
-        # Your previous (0.5 - A) constraint forces A > 0.5, which is risky for night scenes.
-        # This is safer:        
-        loss_atm = torch.mean(F.relu(0.5 - pred_A))
+        # Penalize A being too dark (< 0.05) or > 1.0 (though sigmoid caps at 1)
+        loss_atm = torch.mean(F.relu(0.05 - pred_A)) 
 
         # --- WEIGHTS ---
-        # Adjust these if specific parts are failing
         total_loss = (self.weights["w_flow"] * loss_v) + \
                      (self.weights["w_perc"] * loss_percep) + \
                      (self.weights["w_phys"] * loss_phys) + \

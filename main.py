@@ -56,6 +56,7 @@ def create_args():
     parser.add_argument("--dataset_root", type=str, default=None)
     parser.add_argument("--dataset_name", type=str, default="RESIDE", help="Name of dataset (RESIDE, HAZE4K)")
     parser.add_argument("--resume", type=str, default="")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="Enable gradient checkpointing to save VRAM")
     
     # Generic Overrides
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER)
@@ -122,7 +123,10 @@ if __name__ == "__main__":
 
     # --- 4. Model & Loss ---
     # We pass the CLI argument for model config ("small", "large", or path)
-    model = FM_PhysMamba_UNET(model_cfg_path=args.model_config)
+    model = FM_PhysMamba_UNET(
+        model_cfg_path = args.model_config,
+        gradient_checkpointing = args.gradient_checkpointing
+    )
     
     # Pass cfg to loss so it can read weights (W_FLOW, W_PHYS, etc.)
     criterion = FM_PhysicalLoss(cfg) 
@@ -155,6 +159,11 @@ if __name__ == "__main__":
     ]
 
     cumulative_target_epoch = 0
+
+    # Variables to track the last state for final testing
+    last_save_dir = None
+    # Initialize with None; will be updated in loop
+    val_loader = None
     
     for stage_idx, stage_cfg in enumerate(schedule):
         # Handle access for both Dict (YAML) and CfgNode
@@ -165,11 +174,12 @@ if __name__ == "__main__":
         # Calculate when this stage should end
         cumulative_target_epoch += stage_epochs
 
-        # Skip if we resumed past this stage
-        if trainer.epoch > cumulative_target_epoch:
-            if is_main_process():
-                console.print(f"[dim]Skipping Stage {stage_idx+1} (Res {res}) - Already completed.[/]")
-            continue
+        # Define save directory for this stage
+        current_save_dir = os.path.join(cfg.CHECKPOINT_DIR, f"stage_{stage_idx}_res{res}")
+        last_save_dir = current_save_dir # Update tracker
+        
+        
+      
 
         if is_main_process():
             console.print(Panel(
@@ -191,13 +201,19 @@ if __name__ == "__main__":
             rank=local_rank
         )
 
+        # Skip if we resumed past this stage
+        if trainer.epoch > cumulative_target_epoch:
+            if is_main_process():
+                console.print(f"[dim]Skipping Stage {stage_idx+1} (Res {res}) - Already completed.[/]")
+                continue
+                
         # --- B. Train ---
         # trainer.fit runs from current epoch -> cumulative_target_epoch
         trainer.fit(
             train_loader, 
             val_loader, 
             max_epochs=cumulative_target_epoch, 
-            save_dir=os.path.join(cfg.CHECKPOINT_DIR, f"stage_{stage_idx}_res{res}")
+            save_dir=current_save_dir
         )
         
         # --- C. Checkpoint Stage ---
@@ -205,8 +221,21 @@ if __name__ == "__main__":
             os.path.join(cfg.CHECKPOINT_DIR, f"stage_{stage_idx}_finished.pt")
         )
 
+    # ---------------------------------------------------------
+    # FINAL EVALUATION
+    # ---------------------------------------------------------
+    # Run the test on the very last stage's validation set and best model
+    if is_main_process():
+        console.print(f"[bold yellow]Looking for best model in:[/bold yellow] {last_save_dir}")
+        
+    if last_save_dir and val_loader:
+        trainer.test(val_loader, last_save_dir)
+
+    # --- FIX 4: Close the writer ---
+    trainer.close()
+    
     # --- 8. Cleanup ---
     if distributed:
         clean_ddp()
     elif is_main_process():
-        console.print("[bold green]Training Finished![/]")
+        console.print("[bold green]Script Finished Successfully![/]")

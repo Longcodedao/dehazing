@@ -1,13 +1,13 @@
 [project]
 name = "dehazing"
 version = "0.1.0"
-requires-python = ">=3.11, <3.14"
+requires-python = ">=3.11"
 dependencies = [
   # Using >= allows both "2.7.0" (if exact) and "2.7.0.dev..." (nightly)
   "torch==2.7.0",
   "torchvision==0.22.0",
   "torchaudio==2.7.0",
-  "transformers==4.38.2",
+
   "filelock>=3.13.1",
   "fsspec>=2024.0.0",
   "jinja2>=3.1.0",

@@ -19,5 +19,18 @@ python3 main.py \
   --resume "checkpoints/FM_PhysicMamba_UNET/stage_0_res256/latest.pt" \
   --num_workers 4 \
   --gradient-checkpointing
-    
+
+
+python3 evaluate.py \
+  --checkpoint checkpoints/FM_PhysicMamba_UNET_DDP/stage_0_finished.pt \
+  --data_root dataset \
+  --datasets RESIDE-INDOOR RESIDE-OUTDOOR OHAZE DENSEHAZE \
+  --nfe 10
+
+python3 evaluate.py \
+  --checkpoint checkpoints/FM_PhysicMamba_UNET_DDP/stage_0_finished.pt \
+  --data_root dataset \
+  --datasets OHAZE \
+  --nfe 10
+
 NEXT JOB: Change the augmentation in the Val Transform to not include Resize in that and try to hold the original resolution as much as possible (Using padding to get the shape to be multiple of 16)

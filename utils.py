@@ -168,20 +168,15 @@ def get_eval_loader(
     pin_memory: bool = True
 ):
     """
-    Creates a DataLoader strictly for Evaluation (Validation/Test).
-    
-    Features:
-    - Batch Size = 1 (Required for metrics on varying resolution images).
-    - No Shuffling (Consistent evaluation order).
-    - 'val' Transforms (No resizing, only normalization).
+    Creates a DataLoader for Evaluation (Validation/Test).
+    Automatically handles Single-GPU and Multi-GPU (DDP) scenarios.
     
     Args:
         dataset_name: 'RESIDE-INDOOR', 'RESIDE-OUTDOOR', 'OHAZE', 'DENSEHAZE'
         dataset_root: Path to the main 'dataset' folder.
     """
     
-    # 1. Get Transform (Normalize only, no resize)
-    # We pass 'resolution' just to satisfy the function sig, but split='val' ignores it.
+    # 1. Setup Transforms (Normalize only, no resize)
     val_transform = get_haze_transforms(
         dataset_name=dataset_name, 
         resize_size=resolution, 
@@ -189,55 +184,58 @@ def get_eval_loader(
         verbose=False
     )
     
+    # 2. Select Dataset
     dataset = None
-    
-    # --- RESIDE SOTS INDOOR ---
-    if dataset_name.upper() == "RESIDE-INDOOR":
+    name_upper = dataset_name.upper()
+
+    if name_upper == "RESIDE-INDOOR":
         dataset = RESIDE_SOTS_Indoor(
             dataset_path=os.path.join(dataset_root, "reside-sots"),
             transform=val_transform,
-            metadata="metadata_indoor.csv" # Ensure this CSV exists in reside-sots
+            metadata="metadata_indoor.csv"
         )
-        
-    # --- RESIDE SOTS OUTDOOR ---
-    elif dataset_name.upper() == "RESIDE-OUTDOOR":
+    elif name_upper == "RESIDE-OUTDOOR":
         dataset = RESIDE_SOTS_Outdoor(
             dataset_path=os.path.join(dataset_root, "reside-sots"),
             transform=val_transform
         )
-
-    # --- O-HAZE ---
-    elif dataset_name.upper() == "OHAZE":
-        # Structure: dataset/O-Haze/hazy, dataset/O-Haze/GT
+    elif name_upper == "OHAZE":
         dataset = OHAZE_Dataset(
-            root_dir=os.path.join(dataset_root, "o-haze"),
+            root_dir=os.path.join(dataset_root, "o-haze/O-HAZY"),
             transform=val_transform
         )
-
-    # --- DENSE-HAZE ---
-    elif dataset_name.upper() == "DENSEHAZE":
-        # Structure: dataset/Dense-Haze/hazy, dataset/Dense-Haze/GT
+    elif name_upper == "DENSEHAZE":
         dataset = DENSE_Haze_Dataset(
-            root_dir=os.path.join(dataset_root, "dense-Haze"),
+            root_dir=os.path.join(dataset_root, "dense-haze"),
             transform=val_transform
         )
-        
     else:
         raise ValueError(f"Unknown evaluation dataset: {dataset_name}")
 
-    print(f"[{dataset_name}] Eval Dataset loaded with {len(dataset)} images.")
+    # 3. DDP Logic
+    is_distributed = dist.is_available() and dist.is_initialized()
+    
+    if is_distributed:
+        # Splits data among GPUs so they don't evaluate the same images
+        sampler = DistributedSampler(dataset, shuffle=False) 
+    else:
+        sampler = None
 
-    # 3. Create DataLoader
+    # Only print on Rank 0 to avoid console spam
+    if not is_distributed or (is_distributed and dist.get_rank() == 0):
+        print(f"[{dataset_name}] Eval Dataset loaded: {len(dataset)} images. (DDP: {is_distributed})")
+
+    # 4. Create Loader
     loader = DataLoader(
         dataset,
-        batch_size=1,        # CRITICAL for evaluation
-        shuffle=False,       # CRITICAL for consistent comparisons
+        batch_size=1,        # Always 1 for eval to handle different sizes
+        shuffle=False,       # Never shuffle eval data
+        sampler=sampler,     # Handles the DDP splitting
         num_workers=num_workers,
         pin_memory=pin_memory
     )
     
     return loader
-
     
 
 # --- Padding Utilities for Inference ---
@@ -257,3 +255,186 @@ def unpad(padded_tensor, pad_h, pad_w):
         return padded_tensor
     h_padded, w_padded = padded_tensor.shape[2], padded_tensor.shape[3]
     return padded_tensor[:, :, : h_padded - pad_h, : w_padded - pad_w]
+
+
+
+def predict_large_image(solver, full_img_tensor, device, progress=None, tile_size=256, overlap_ratio=0.25, batch_size=4, nfe=10):
+    """
+    Performs sliding-window inference with Rich progress bar integration.
+    """
+    b, c, h, w = full_img_tensor.shape
+    
+    # ... [Setup Canvas & Stride as before] ...
+    output_canvas = torch.zeros((1, c, h, w), device=device)
+    count_map = torch.zeros((1, 1, h, w), device=device)
+    stride = int(tile_size * (1 - overlap_ratio))
+    
+    # ... [Setup Coordinates as before] ...
+    h_starts = list(range(0, h - tile_size + stride, stride))
+    w_starts = list(range(0, w - tile_size + stride, stride))
+    if h_starts[-1] + tile_size > h: h_starts[-1] = h - tile_size
+    if w_starts[-1] + tile_size > w: w_starts[-1] = w - tile_size
+    h_starts = sorted(list(set(h_starts)))
+    w_starts = sorted(list(set(w_starts)))
+
+    # ... [Weight Mask as before] ...
+    def get_weight_mask(size):
+        coords = torch.linspace(0, 1, size, device=device)
+        mask_1d = 1 - torch.abs(2 * coords - 1)
+        mask_1d = mask_1d.unsqueeze(0)
+        mask_2d = mask_1d.t() * mask_1d
+        return mask_2d.unsqueeze(0).unsqueeze(0)
+
+    weight_mask = get_weight_mask(tile_size)
+
+    # --- RICH INTEGRATION START ---
+    tiles = []
+    coords = []
+    all_patches = [(y, x) for y in h_starts for x in w_starts]
+    
+    # Create a temporary sub-task if progress is provided
+    if progress is not None:
+        # 'transient=True' means the bar disappears when finished
+        tile_task_id = progress.add_task(f"  └─ Tiling ({len(all_patches)} patches)", total=len(all_patches), transient=True)
+    
+    for i, (y, x) in enumerate(all_patches):
+        # Extract Crop
+        crop = full_img_tensor[:, :, y:y+tile_size, x:x+tile_size].to(device)
+        tiles.append(crop)
+        coords.append((y, x))
+        
+        # Inference condition
+        if len(tiles) == batch_size or i == len(all_patches) - 1:
+            batch_tensor = torch.cat(tiles, dim=0)
+            
+            with torch.amp.autocast("cuda"):
+                prediction_batch = solver.sample(batch_tensor, nfe=nfe)
+            
+            # Stitching
+            for j, pred_tile in enumerate(prediction_batch):
+                y_c, x_c = coords[j]
+                pred_tile = pred_tile.unsqueeze(0)
+                output_canvas[:, :, y_c:y_c+tile_size, x_c:x_c+tile_size] += pred_tile * weight_mask
+                count_map[:, :, y_c:y_c+tile_size, x_c:x_c+tile_size] += weight_mask
+            
+            tiles = []
+            coords = []
+            
+        # Update Rich Progress 
+        if progress is not None:
+            progress.update(tile_task_id, advance=1)
+            
+    # --- RICH INTEGRATION END ---
+
+    final_output = output_canvas / (count_map + 1e-8)
+    return final_output
+
+
+
+@torch.no_grad()
+def predict_large_image_vectorized(solver, full_img_tensor, device, progress=None, tile_size=256, overlap_ratio=0.25, batch_size=4, nfe=10):
+    """
+    Vectorized sliding window inference using F.unfold/F.fold.
+    Much faster preparation than manual slicing loops.
+    """
+    b, c, h, w = full_img_tensor.shape
+    
+    # 1. Calculate Padding
+    # Unfold drops pixels if they don't fit the stride. We pad to ensure coverage.
+    stride = int(tile_size * (1 - overlap_ratio))
+    
+    # Calculate required height/width to be divisible by stride
+    # Formula: (Size - Kernel) % Stride == 0
+    pad_h = (stride - (h - tile_size) % stride) % stride
+    pad_w = (stride - (w - tile_size) % stride) % stride
+    
+    # Add extra padding if the image is smaller than the tile
+    if h < tile_size: pad_h += tile_size - h
+    if w < tile_size: pad_w += tile_size - w
+
+    # Pad image (Reflect padding usually best for dehazing to avoid borders)
+    img_padded = F.pad(full_img_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+    hp, wp = img_padded.shape[2], img_padded.shape[3]
+
+    # 2. Vectorized Unfold (Extract all patches at once)
+    # Output shape: (1, C * tile_size * tile_size, Num_Patches)
+    patches_raw = F.unfold(img_padded, kernel_size=tile_size, stride=stride)
+    
+    # Reshape to (Num_Patches, C, tile_size, tile_size) for the model
+    # 1. Transpose -> (1, Num_Patches, Flattened_Patch)
+    # 2. View -> (Num_Patches, C, tile_size, tile_size)
+    num_patches = patches_raw.shape[2]
+    patches_raw = patches_raw.transpose(1, 2).view(num_patches, c, tile_size, tile_size)
+    
+    # 3. Create Weight Mask (for smooth blending)
+    # We create one mask and repeat it for all patches
+    def get_weight_mask(size):
+        coords = torch.linspace(0, 1, size, device=device)
+        mask_1d = 1 - torch.abs(2 * coords - 1)
+        mask_2d = mask_1d.unsqueeze(0).t() * mask_1d.unsqueeze(0)
+        return mask_2d.unsqueeze(0).unsqueeze(0) # (1, 1, H, W)
+
+    weight_patch = get_weight_mask(tile_size) # (1, 1, 256, 256)
+    
+    # 4. Batched Inference Loop
+    # We can't process ALL patches at once (OOM), so we chunk them by 'batch_size'
+    pred_patches_list = []
+    
+    # Rich Progress Setup
+    task_id = None
+    if progress is not None:
+        task_id = progress.add_task(f"  └─ Vectorized ({num_patches} patches)", total=num_patches, transient=True)
+
+    for i in range(0, num_patches, batch_size):
+        # Select batch
+        chunk = patches_raw[i : i + batch_size].to(device)
+        
+        with torch.amp.autocast("cuda"):
+            # Model Output: (Batch, C, 256, 256)
+            pred_chunk = solver.sample(chunk, nfe=nfe)
+            
+        # Apply weighting *immediately* to save memory later
+        # (Batch, C, 256, 256) * (1, 1, 256, 256)
+        pred_chunk_weighted = pred_chunk * weight_patch
+        
+        # Flatten back to (Batch, C*H*W) for folding
+        pred_chunk_flat = pred_chunk_weighted.view(pred_chunk.shape[0], -1)
+        pred_patches_list.append(pred_chunk_flat)
+        
+        if progress is not None:
+            progress.update(task_id, advance=chunk.shape[0])
+
+    # Concatenate all processed patches: (Num_Patches, Flattened_Pixels)
+    pred_patches_all = torch.cat(pred_patches_list, dim=0)
+    
+    # 5. Fold (Stitch back together)
+    # Reshape to (1, Flattened_Pixels, Num_Patches) for F.fold
+    pred_patches_all = pred_patches_all.t().unsqueeze(0)
+    
+    # Fold creates the summed image
+    output_sum = F.fold(
+        pred_patches_all, 
+        output_size=(hp, wp), 
+        kernel_size=tile_size, 
+        stride=stride
+    )
+    
+    # 6. Normalize Weights (Account for overlaps)
+    # We do the same "Unfold -> Fold" process for the weights to know what to divide by
+    ones_patch = torch.ones(1, 1, tile_size, tile_size, device=device) * weight_patch
+    ones_flat = ones_patch.view(1, -1).repeat(num_patches, 1).t().unsqueeze(0) # Repeat weight for every patch
+    
+    weight_sum = F.fold(
+        ones_flat,
+        output_size=(hp, wp),
+        kernel_size=tile_size,
+        stride=stride
+    )
+    
+    # 7. Final Normalize & Crop
+    final_img = output_sum / (weight_sum + 1e-8)
+    
+    # Crop back to original size (remove padding)
+    final_img = final_img[:, :, :h, :w]
+    
+    return final_img

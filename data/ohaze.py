@@ -4,7 +4,6 @@ from PIL import Image
 import numpy as np
 from pathlib import Path
 
-
 class OHAZE_Dataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.dataset_dir = Path(root_dir)
@@ -54,3 +53,5 @@ class OHAZE_Dataset(Dataset):
             )
 
         return clean_img, hazy_img
+
+

@@ -3,10 +3,11 @@ name = "dehazing"
 version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
-  # Changed to >= to allow Nightly versions (e.g., 2.7.0.dev...)
-  "torch>=2.6.0",
-  "torchvision>=0.21.0",
-  "torchaudio>=2.6.0",
+  # Using >= allows both "2.7.0" (if exact) and "2.7.0.dev..." (nightly)
+  "torch==2.7.0",
+  "torchvision==0.22.0",
+  "torchaudio==2.7.0",
+
   "filelock>=3.13.1",
   "fsspec>=2024.0.0",
   "jinja2>=3.1.0",
@@ -14,11 +15,6 @@ dependencies = [
   "mpmath>=1.3.0",
   "networkx>=3.0",
   "numpy>=1.26.0",
-  
-  # REMOVED EXPLICIT NVIDIA BINARIES 
-  # (Let PyTorch Nightly pull the correct CUDA 12.8 dependencies automatically 
-  # to avoid version conflicts with the manual 12.4 pins you had)
-  
   "pillow>=10.0.0",
   "sympy>=1.12",
   "triton>=3.0.0",
@@ -37,10 +33,24 @@ dependencies = [
   "tensorboard>=2.15.0",
   "thop>=0.1.1.post2209072238",
   "rich>=13.7.0",
+
+  # --- BUILD DEPENDENCIES ---
+  # These are critical for the fallback "Source Build" to work on Mac/Windows
+  "ninja>=1.11.1",
+  "packaging>=23.2",
+
+  # The main libraries
+  "mamba_ssm==2.2.6.post3",
+  "causal_conv1d==1.5.4"
 ]
 
-# --- UV-specific Configuration ---
-# WE CHANGED THIS TO NIGHTLY CUDA 12.8
+# --- UV Configuration ---
+
+[tool.uv]
+prerelease = "allow"
+# Ensure build environment sees the Nightly Torch
+build-constraint-dependencies = ["torch==2.7.0", "ninja", "packaging"]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -50,6 +60,29 @@ explicit = true
 torch = [{ index = "pytorch-cu128" }]
 torchvision = [{ index = "pytorch-cu128" }]
 torchaudio = [{ index = "pytorch-cu128" }]
+
+# --- SMART FALLBACK LOGIC ---
+# Strategy: Use specific markers to direct Linux Users to Wheels, and everyone else to Git.
+
+causal-conv1d = [
+    # PATH A: Binary Wheels (Linux x86_64 ONLY) - ABI=True
+    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.4/causal_conv1d-1.5.4+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.11'" },
+    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.4/causal_conv1d-1.5.4+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.5.4/causal_conv1d-1.5.4+cu12torch2.7cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    
+    # PATH B: Fallback to Source (Mac, Windows, or ARM Linux)
+    { git = "https://github.com/Dao-AILab/causal-conv1d/", tag = "v1.5.4", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" }
+]
+
+mamba-ssm = [
+    # PATH A: Binary Wheels (Linux x86_64 ONLY) - ABI=True
+    { url = "https://github.com/state-spaces/mamba/releases/download/v2.2.6.post3/mamba_ssm-2.2.6.post3+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.11'" },
+    { url = "https://github.com/state-spaces/mamba/releases/download/v2.2.6.post3/mamba_ssm-2.2.6.post3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/state-spaces/mamba/releases/download/v2.2.6.post3/mamba_ssm-2.2.6.post3+cu12torch2.7cxx11abiTRUE-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+
+    # PATH B: Fallback to Source (Mac, Windows, or ARM Linux)
+    { git = "https://github.com/state-spaces/mamba", tag = "v2.2.6.post3", marker = "sys_platform != 'linux' or platform_machine != 'x86_64'" }
+]
 
 [dependency-groups]
 dev = [

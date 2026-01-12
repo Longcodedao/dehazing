@@ -1,11 +1,12 @@
-torchrun --nproc_per_node=2 main.py \
+torchrun --nproc_per_node=4 main.py \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
   --dataset_name "RESIDE" \
   --log_dir "logs/FM_PhysicMamba_UNET_DDP" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_DDP" \
-  --num_workers 4
+  --num_workers 4 \
+  --gradient-checkpointing
 
 python3 main.py \
   --seed 42 \

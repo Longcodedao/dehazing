@@ -25,6 +25,7 @@ from utils_ddp import is_main_process
 from utils import pad_to_multiple, unpad
 from model import ODESolver, path_sampler 
 from data.utils import restandardize_tensor
+import scheduler
 
 class DehazeTrainer:
     def __init__(self, cfg, model, criterion, local_rank):
@@ -72,9 +73,10 @@ class DehazeTrainer:
             lr=cfg.OPTIM.LR, 
             weight_decay=cfg.OPTIM.WEIGHT_DECAY
         )
-        self.scheduler = optim.lr_scheduler.StepLR(
-            self.optimizer, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
-        )
+        # self.scheduler = optim.lr_scheduler.StepLR(
+        #     self.optimizer, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
+        # )
+        self.scheduler = scheduler.get_scheduler(self.optimizer, cfg) 
 
         # Metrics
         self.train_metrics = MetricCollection({

@@ -52,7 +52,7 @@ _C.LOSS.W_ATM = 0.01
 
 # --- Evaluation ---
 _C.EVAL = CN()
-_C.EVAL.EVAL_INTERVAL = 2
+_C.EVAL.EVAL_INTERVAL = 5
 # I always set batch size = 1 in eval batch size
 _C.EVAL.BATCH_SIZE = 16 
 

@@ -118,7 +118,7 @@ def get_haze_transforms(
                 v2.RandomGrayscale(p=0.2),
             ])
             
-        elif dataset_name in ["RESIDE", "HAZE4K"]:
+        elif dataset_name in ["RESIDE-INDOOR", "HAZE4K"]:
             haze_only_transforms = v2.Compose([
                 v2.ColorJitter(
                     brightness=0.15, 
@@ -126,6 +126,20 @@ def get_haze_transforms(
                     saturation=0.15, 
                     hue=0.01
                 )
+            ])
+
+        # Inrease the Saturation and Hue Jitter to force the model to
+        # generalize to different weather conditions/times of day 
+        elif dataset_name == "RESIDE-OUTDOOR":
+            haze_only_transforms = v2.Compose([
+                v2.ColorJitter(
+                    brightness = 0.2, 
+                    contrast = 0.2,
+                    saturation = 0.2, # Stronger saturation jitter
+                    hue = 0.05        # Allow slight color shifting (simulates time-of-day)
+                ), 
+                # Optional: Occasional Grayscale forces reliance on structure, not just color
+                v2.RandomGrayscale(p=0.1),
             ])
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}")

@@ -98,7 +98,7 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
         # IMPORTANT: Ensure your OTS subset file (e.g., dense_haze.txt) is used if needed
         # Modify the class init if you need to pass a specific .txt file list
         train_dataset = RESIDE_Outdoor(
-            dataset_path=os.path.join(data_cfg.DATASET_ROOT, "reside-outdoor"),
+            dataset_path=os.path.join(data_cfg.DATASET_ROOT, "outdoor-training-set"),
             transform=train_transform,
         )
         val_dataset = RESIDE_SOTS_Outdoor(

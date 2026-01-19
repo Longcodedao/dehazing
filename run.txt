@@ -2,7 +2,7 @@ torchrun --nproc_per_node=4 main.py \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
-  --dataset_name "RESIDE" \
+  --dataset_name "RESIDE-INDOOR" \
   --log_dir "logs/FM_PhysicMamba_UNET_DDP" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_DDP" \
   --num_workers 4 \
@@ -13,7 +13,7 @@ python3 main.py \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
-  --dataset_name "RESIDE" \
+  --dataset_name "RESIDE-INDOOR" \
   --log_dir "logs/FM_PhysicMamba_UNET" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET" \
   --resume "checkpoints/FM_PhysicMamba_UNET/stage_0_res256/latest.pt" \
@@ -34,3 +34,18 @@ python3 evaluate.py \
   --nfe 10
 
 NEXT JOB: Change the augmentation in the Val Transform to not include Resize in that and try to hold the original resolution as much as possible (Using padding to get the shape to be multiple of 16)
+
+
+# Fine tuning 
+
+python3 main.py \
+  --seed 42 \
+  --model-config "small" \
+  --pretrain-config "configs/train_cfgs/finetune_schedule.yaml" \
+  --dataset_root "dataset" \
+  --dataset_name "RESIDE-OUTDOOR" \
+  --log_dir "logs/FM_PhysicMamba_UNET_finetune" \
+  --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_finetune" \
+  --pretrained_model checkpoints/FM_PhysicMamba_UNET_DDP/stage_0_res256/best.pt \
+  --num_workers 4 \
+  --gradient-checkpointing

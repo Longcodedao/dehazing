@@ -51,6 +51,12 @@ def create_args():
     parser.add_argument("--log_dir", type=str, default=None)
     parser.add_argument("--pin_memory", type=int, choices=[0, 1], default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
+
+    # Fine-tuning options
+    parser.add_argument("--pretrained_model", type=str, default="", 
+                        help="Path to load ONLY model weights (for fine-tuning)")
+    parser.add_argument("--strict_load", action="store_true", 
+                        help="Whether to load the state_dict strictly")
     
     # Data Overrides
     parser.add_argument("--dataset_root", type=str, default=None)
@@ -127,6 +133,30 @@ if __name__ == "__main__":
         model_cfg_path = args.model_config,
         gradient_checkpointing = args.gradient_checkpointing
     )
+
+    if args.pretrained_model:
+        if is_main_process():
+            console.print(f"[bold green]Loading pretrained weights from:[/][white] {args.pretrained_model}")
+        # Load the file
+        checkpoint = torch.load(args.pretrained_model, map_location='cpu', weights_only=False)
+
+    
+        # Extract model state even if it's a full checkpoint [1]
+        if 'model' in checkpoint:
+            state_dict = checkpoint['model']
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+            
+        # Clean DDP keys (removing 'module.') so it can load on any setup [1]
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+        
+        # Load into model
+        msg = model.load_state_dict(state_dict, strict=args.strict_load)
+        if is_main_process():
+            console.print(f"[yellow]Load status:[/] {msg}")
+
     
     # Pass cfg to loss so it can read weights (W_FLOW, W_PHYS, etc.)
     criterion = FM_PhysicalLoss(cfg) 
@@ -140,6 +170,7 @@ if __name__ == "__main__":
         cfg_str = yaml.dump(convert_cfg_to_dict(cfg), sort_keys=False)
         trainer.writer.add_text("Configuration", f"```yaml\n{cfg_str}\n```", 0)
 
+    
     # --- 7. Resume if needed ---
     if cfg.TRAIN.RESUME_PATH:
         trainer.load_checkpoint(cfg.TRAIN.RESUME_PATH)

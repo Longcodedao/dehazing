@@ -15,6 +15,7 @@ _C.CHECKPOINT_INTERVAL = 5
 _C.DATA = CN()
 _C.DATA.DATASET_ROOT = "dataset"
 _C.DATA.RESIDE_INDOOR_PATH = "indoor-training-set"
+_C.DATA.RESIDE_OUTDOOR_PATH = "outdoor-training-set"
 _C.DATA_RESIDE_INDOOR_SOTS_PATH = "reside-sots/indoor"
 _C.DATA_RESIDE_OUTDOOR_SOTS_PATH = "reside-sots/outdoor"
 _C.DATA.HAZE4K_PATH = "haze4k"

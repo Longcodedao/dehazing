@@ -2,6 +2,7 @@ import os
 import random
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -84,6 +85,7 @@ class DehazeTrainer:
             "Loss_Flow": MeanMetric(),
             "Loss_Phys": MeanMetric(),
             "Loss_VGG": MeanMetric(),
+            "Loss_FFT": MeanMetric()
         }).to(self.device)
         
         self.eval_metrics = MetricCollection({
@@ -239,12 +241,14 @@ class DehazeTrainer:
             self.train_metrics["Loss_Flow"].update(loss_dict["Flow"])
             self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
             self.train_metrics["Loss_VGG"].update(loss_dict["VGG"])
+            self.train_metrics["Loss_FFT"].update(loss_dict["FFT"])
 
             if is_main_process():
                 info_str = (
                     f"L:{loss.item():.3f} "
                     f"| F:{loss_dict['Flow']:.3f} "
                     f"P:{loss_dict['Phys']:.3f} "
+                    f"FFT: {loss_dict['FFT']:.3f} "
                     f"V:{loss_dict['VGG']:.3f}"
                 )
                 progress.update(task_id, advance=1, info=info_str)

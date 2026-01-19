@@ -1,7 +1,16 @@
 SCHEDULE:
   - RESOLUTION: 256 
     EPOCHS: 100
-    BATCH_SIZE: 64
+    BATCH_SIZE: 32
     
 SCHEDULER:
     WARMUP_EPOCHS: 20
+
+LOSS:
+    W_FLOW: 1.0
+    W_PERC: 0.2
+    W_PHYS: 0.2
+    W_TV: 0.01
+    W_ATM: 0.01 
+    W_FFT: 0.01 
+    DENSITY_BOOST: 2.0

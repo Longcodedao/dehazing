@@ -84,11 +84,11 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
     if dataset_name == "RESIDE-INDOOR":
         if verbose: print(f"Loading RESIDE Indoor (ITS)...")
         train_dataset = RESIDE_Indoor(
-            dataset_path=os.path.join(data_cfg.DATASET_ROOT, "reside-indoor"),
+            dataset_path=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_INDOOR_PATH),
             transform=train_transform,
         )
         val_dataset = RESIDE_SOTS_Indoor(
-            dataset_path=os.path.join(data_cfg.DATASET_ROOT, "reside-sots"),
+            dataset_path=os.path.join(data_cfg.DATASET_ROOT, data_cfg.RESIDE_SOTS_PATH),
             transform=val_transform,
             metadata="metadata_indoor.csv",
         )

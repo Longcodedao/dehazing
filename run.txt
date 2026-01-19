@@ -14,9 +14,9 @@ python3 main.py \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
   --dataset_root "dataset" \
   --dataset_name "RESIDE-INDOOR" \
-  --log_dir "logs/FM_PhysicMamba_UNET" \
-  --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET" \
-  --resume "checkpoints/FM_PhysicMamba_UNET/stage_0_res256/latest.pt" \
+  --log_dir "logs/FM_PhysicMamba_UNET_Version2" \
+  --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_Version2" \
+  --resume "checkpoints/FM_PhysicMamba_UNET_Version2/stage_0_res256/latest.pt" \
   --num_workers 4 \
   --gradient-checkpointing
 

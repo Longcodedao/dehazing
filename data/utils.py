@@ -94,8 +94,21 @@ def get_haze_transforms(
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
     ])
-
-    # --- 2. Training Logic ---
+    
+    # --- 2. SANITY CHECK LOGIC (New!) ---
+    if split == "sanity":
+        # STRICTLY DETERMINISTIC. 
+        # No RandomCrop. No Flips. No Jitter. Just Resize & Normalize.
+        def sanity_transform(clear_img, hazy_img):
+            clean_img = train_common(clear_img)
+            hazy_img = train_common(hazy_img)
+            return clean_img, hazy_img
+            
+        if verbose:
+            print("Transform Mode: SANITY (Deterministic Resize)")
+        return sanity_transform
+        
+    # --- 3. Training Logic ---
     if split == "train":
         geometric_sync_transforms = v2.Compose([
             v2.RandomCrop(resize_size, pad_if_needed=True),
@@ -108,11 +121,11 @@ def get_haze_transforms(
         # We reduce the intensity significantly.
         # The goal is "Domain Randomization" (robustness), not "Data Distortion".
         
-        if dataset_name == "O-HAZE":
+        if dataset_name == "OHAZE":
             haze_only_transforms = v2.Compose([
                 v2.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.0),
             ])
-        elif dataset_name == "DENSE-HAZE":
+        elif dataset_name == "DENSEHAZE":
             haze_only_transforms = v2.Compose([
                 v2.ColorJitter(brightness=0.05, contrast=0.05, saturation=0.05, hue=0.0),
                 v2.RandomGrayscale(p=0.2),

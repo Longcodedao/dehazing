@@ -16,8 +16,8 @@ _C.DATA = CN()
 _C.DATA.DATASET_ROOT = "dataset"
 _C.DATA.RESIDE_INDOOR_PATH = "indoor-training-set"
 _C.DATA.RESIDE_OUTDOOR_PATH = "outdoor-training-set"
-_C.DATA_RESIDE_INDOOR_SOTS_PATH = "reside-sots/indoor"
-_C.DATA_RESIDE_OUTDOOR_SOTS_PATH = "reside-sots/outdoor"
+_C.DATA.RESIDE_SOTS_PATH = "reside-sots"
+
 _C.DATA.HAZE4K_PATH = "haze4k"
 _C.DATA.O_HAZE = "o-haze"
 _C.DATA.DENSE_HAZE = "dense-haze"
@@ -46,10 +46,12 @@ _C.SCHEDULER.WARMUP_EPOCHS = 10
 # --- Loss Weights ---
 _C.LOSS = CN()
 _C.LOSS.W_FLOW = 1.0 
-_C.LOSS.W_PERC = 0.1 
+_C.LOSS.W_PERC = 0.2 
 _C.LOSS.W_PHYS = 0.2
 _C.LOSS.W_TV = 0.01
 _C.LOSS.W_ATM = 0.01 
+_C.LOSS.W_FFT = 0.1
+_C.LOSS.DENSITY_BOOST = 5.0
 
 # --- Evaluation ---
 _C.EVAL = CN()

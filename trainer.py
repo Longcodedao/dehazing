@@ -56,7 +56,7 @@ class DehazeTrainer:
                 self.model, 
                 device_ids=[local_rank],
                 output_device=local_rank,
-                find_unused_parameters=False 
+                find_unused_parameters=True 
             )
             if is_main_process():
                 self.console.print(Panel(f"[bold green]DDP Initialized (Rank {local_rank})[/]", title="System"))

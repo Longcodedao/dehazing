@@ -111,6 +111,23 @@ if __name__ == "__main__":
     # --- 2. Setup Args & Config ---
     args = create_args()
     cfg = setup_config(args)
+
+    # =========================================================
+    # [CRITICAL UPDATE] Calculate Total Epochs from Schedule
+    # =========================================================
+    if len(cfg.SCHEDULE) > 0:
+        total_schedule_epochs = sum([s.get('EPOCHS', 0) for s in cfg.SCHEDULE])
+        
+        # Override the global epoch count so the Scheduler knows 
+        # it has 150 epochs to decay, not just 100.
+        # We need to unfreeze, modify, and refreeze.
+        cfg.defrost()
+        cfg.TRAIN.EPOCHS = total_schedule_epochs
+        cfg.freeze()
+        
+        if is_main_process():
+            console.print(f"[bold yellow]Progressive Schedule Detected:[/]")
+            console.print(f"Total Epochs set to: [bold cyan]{total_schedule_epochs}[/] (Sum of stages)")
     
     # --- 3. Reproducibility ---
     # We add local_rank to seed to ensure different seeds on different GPUs
@@ -132,7 +149,8 @@ if __name__ == "__main__":
     # We pass the CLI argument for model config ("small", "large", or path)
     model = FM_PhysMamba_UNET(
         model_cfg_path = args.model_config,
-        gradient_checkpointing = args.gradient_checkpointing
+        gradient_checkpointing = args.gradient_checkpointing,
+        use_version = 2
     )
 
     if args.pretrained_model:

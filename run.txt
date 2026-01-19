@@ -8,7 +8,7 @@ torchrun --nproc_per_node=4 main.py \
   --num_workers 4 \
   --gradient-checkpointing
 
-python3 main.py \
+torchrun --nproc_per_node=4  main.py \
   --seed 42 \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
@@ -16,9 +16,10 @@ python3 main.py \
   --dataset_name "RESIDE-INDOOR" \
   --log_dir "logs/FM_PhysicMamba_UNET_Version2" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_Version2" \
-  --resume "checkpoints/FM_PhysicMamba_UNET_Version2/stage_0_res256/latest.pt" \
   --num_workers 4 \
   --gradient-checkpointing
+
+  --resume "checkpoints/FM_PhysicMamba_UNET_Version2/stage_0_res256/latest.pt" \
 
 
 python3 evaluate.py \

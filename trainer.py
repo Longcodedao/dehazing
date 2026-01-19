@@ -267,7 +267,10 @@ class DehazeTrainer:
         # --- RANDOM SELECTION SETUP ---
         visuals_buffer = {"hazy": [], "clean": [], "pred": []}
         target_batch_indices = set()
-        
+
+        # Define a fixed size for visualization to prevent shape mismatches
+        VIZ_SIZE = (256, 256)
+            
         if is_main_process():
             # 1. Determine which batches to save
             total_batches = len(loader)
@@ -311,10 +314,16 @@ class DehazeTrainer:
             # --- CAPTURE LOGIC ---
             # Check if current batch_idx is in our pre-selected random set
             if is_main_process() and batch_idx in target_batch_indices:
-                # Move to CPU immediately
-                visuals_buffer["hazy"].append(hazy_final.cpu())
-                visuals_buffer["clean"].append(clean_final.cpu())
-                visuals_buffer["pred"].append(pred_final.cpu())
+                # 1. Resize images to a common size so torch.cat won't crash later
+                #    We use 'bilinear' for smooth resizing of photos.
+                h_viz = F.interpolate(hazy_final, size=VIZ_SIZE, mode='bilinear', align_corners=False)
+                c_viz = F.interpolate(clean_final, size=VIZ_SIZE, mode='bilinear', align_corners=False)
+                p_viz = F.interpolate(pred_final, size=VIZ_SIZE, mode='bilinear', align_corners=False)
+
+                # 2. Append the RESIZED tensors to the buffer
+                visuals_buffer["hazy"].append(h_viz.cpu())
+                visuals_buffer["clean"].append(c_viz.cpu())
+                visuals_buffer["pred"].append(p_viz.cpu())
                 
             if is_main_process():
                 progress.update(task_id, advance=1, info="")

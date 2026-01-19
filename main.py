@@ -19,6 +19,7 @@ from utils import (
     convert_cfg_to_dict,
     set_seed,
     get_loaders_for_stage, 
+    get_eval_loader
 )
 from utils_ddp import setup_ddp, clean_ddp, is_main_process
 
@@ -195,6 +196,12 @@ if __name__ == "__main__":
     last_save_dir = None
     # Initialize with None; will be updated in loop
     val_loader = None
+
+    # indoor_val_loader = get_eval_loader(
+    #     dataset_name="RESIDE-INDOOR",
+    #     dataset_root=args.dataset_root,
+    #     num_workers=args.num_workers
+    # )
     
     for stage_idx, stage_cfg in enumerate(schedule):
         # Handle access for both Dict (YAML) and CfgNode

@@ -38,7 +38,7 @@ NEXT JOB: Change the augmentation in the Val Transform to not include Resize in 
 
 # Fine tuning 
 
-python3 main.py \
+torchrun --nproc_per_node=2 main.py \
   --seed 42 \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/finetune_schedule.yaml" \
@@ -49,3 +49,10 @@ python3 main.py \
   --pretrained_model checkpoints/FM_PhysicMamba_UNET_DDP/stage_0_res256/best.pt \
   --num_workers 4 \
   --gradient-checkpointing
+
+
+python3 evaluate.py \
+  --checkpoint checkpoints/FM_PhysicMamba_UNET_finetune/stage_0_res256/latest.pt \
+  --data_root dataset \
+  --datasets RESIDE-INDOOR RESIDE-OUTDOOR \
+  --nfe 10

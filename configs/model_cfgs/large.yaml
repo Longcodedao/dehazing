@@ -1,16 +1,17 @@
 VERSION: "large"
-BASE_DIM: 96            # Keep high channel count for capacity
+BASE_DIM: 112            # Keep high channel count for capacity
 DIM_MULTS: [1, 2, 4, 8] # 4 Scales: 256->128->64->32
 
 PHYSICS_GUIDED: True
 
-# THE FIX: Set the first number to 0.
-# [0, 2, 6] means:
-# - Stage 1 (256x256): 1 Conv + 0 Mamba (Pure CNN, Low VRAM)
-# - Stage 2 (128x128): 1 Conv + 2 Mamba
-# - Stage 3 (64x64):   1 Conv + 6 Mamba (Heavy processing here!)
-ENCODER_BLOCKS: [0, 2, 4]
+# [0, 2, 6, 8]
+# Stage 1 (256x): 0 Blocks (Pure Conv, fast downsampling)
+# Stage 2 (128x): 2 Blocks
+# Stage 3 (64x):  6 Blocks (Heavy feature processing)
+# Stage 4 (32x):  8 Blocks (The Bottleneck / Deepest abstract reasoning)
+ENCODER_BLOCKS: [0, 2, 6, 8] 
 
 # Mirror for Decoder
-# Note: Decoder indices run backwards, so this applies similarly
-DECODER_BLOCKS: [0, 2, 4]
+DECODER_BLOCKS: [0, 2, 6, 8]
+
+TIME_DIM_MULT: 4

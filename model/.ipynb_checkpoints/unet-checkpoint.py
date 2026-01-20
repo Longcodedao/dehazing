@@ -201,6 +201,8 @@ class FM_PhysMamba_UNET(nn.Module):
         self.physics_guided = self.cfg.PHYSICS_GUIDED
         enc_blocks_list = self.cfg.ENCODER_BLOCKS
         dec_blocks_list = self.cfg.DECODER_BLOCKS
+        num_mid_blocks = enc_blocks_list[-1] if len(enc_blocks_list) >= len(self.dims) else 2
+
         self.use_version = use_version 
         self.use_checkpoint = gradient_checkpointing # <--- New Flag
         self.dims = [base_dim * m for m in dim_mults]
@@ -241,10 +243,15 @@ class FM_PhysMamba_UNET(nn.Module):
             self.downsamples.append(nn.Conv2d(dim_in, dim_out, 4, 2, 1)) 
 
         # --- BOTTLENECK ---
-        mid_dim = self.dims[-1]
-        self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
-        self.mid_block1 = PhysBiMambaBlock(mid_dim)
-        self.mid_block2 = PhysBiMambaBlock(mid_dim)
+        # We will use for the small version
+        # mid_dim = self.dims[-1]
+        # self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
+        # self.mid_block1 = PhysBiMambaBlock(mid_dim)
+        # self.mid_block2 = PhysBiMambaBlock(mid_dim)
+
+        self.mid_blocks = nn.ModuleList()
+        for _ in range(num_mid_blocks):
+            self.mid_blocks.append(PhysBiMambaBlock(mid_dim))
         
         self.atm_head = nn.Sequential(
             nn.AdaptiveAvgPool2d(1), nn.Flatten(),
@@ -317,12 +324,20 @@ class FM_PhysMamba_UNET(nn.Module):
             
         # 3. BOTTLENECK
         t_emb_mid = self.mid_time_proj(t_vec)
-        if self.use_checkpoint and self.training:
-            h = checkpoint.checkpoint(self.mid_block1, h, t_emb_mid, use_reentrant=False)
-            h = checkpoint.checkpoint(self.mid_block2, h, t_emb_mid, use_reentrant=False)
-        else:
-            h = self.mid_block1(h, t_emb_mid)
-            h = self.mid_block2(h, t_emb_mid)
+        # We will use this for the small version
+        # if self.use_checkpoint and self.training:
+        #     h = checkpoint.checkpoint(self.mid_block1, h, t_emb_mid, use_reentrant=False)
+        #     h = checkpoint.checkpoint(self.mid_block2, h, t_emb_mid, use_reentrant=False)
+        # else:
+        #     h = self.mid_block1(h, t_emb_mid)
+        #     h = self.mid_block2(h, t_emb_mid)
+
+        # We will adapt to this later (Maybe for the O-HAZE DENSE-HAZE Training)
+        for block in self.mid_blocks:
+            if self.use_checkpoint and self.training:
+                h = checkpoint.checkpoint(block, h, t_emb_mid, use_reentrant=False)
+            else:
+                h = block(h, t_emb_mid)
         
         A_pred = self.atm_head(h).view(-1, 3, 1, 1)
         

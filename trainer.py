@@ -8,6 +8,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
+from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn 
 
 # --- Third Party Imports ---
 from torchmetrics import MetricCollection, MeanMetric 
@@ -48,6 +49,12 @@ class DehazeTrainer:
           
         # --- Model setup ---
         self.model = model.to(self.device)
+
+        # --- EMA Initialization (Create Shadow Model) ---
+        # We initialize EMA *before* DDP wraping so it tracks the local weights cleanly.
+        # decay=0.999 is standard. Use 0.9999 for very long training (>100k steps).
+        self.ema_model = AveragedModel(self.model, 
+                                       multi_avg_fn = get_ema_multi_avg_fn(0.999))
         
         # 4. Conditional DDP Wrapping
         if self.is_distributed:
@@ -63,10 +70,11 @@ class DehazeTrainer:
         else:
             if is_main_process():
                 self.console.print(Panel(f"[bold yellow]Single GPU Mode (No DDP)[/]", title="System"))
+
         
         # 5. Initialize Solver & Optimizer
         self.criterion = criterion.to(self.device)
-        self.scalar = torch.amp.GradScaler(self.device)
+        self.scaler = torch.amp.GradScaler(self.device)
         self.ode_solver = ODESolver(self.raw_model)
         
         self.optimizer = optim.AdamW(
@@ -78,7 +86,8 @@ class DehazeTrainer:
         #     self.optimizer, step_size=cfg.SCHEDULER.STEP_SIZE, gamma=cfg.SCHEDULER.GAMMA
         # )
         self.scheduler = scheduler.get_scheduler(self.optimizer, cfg) 
-
+        self.amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        
         # Metrics
         self.train_metrics = MetricCollection({
             "Loss_Total": MeanMetric(),
@@ -135,7 +144,6 @@ class DehazeTrainer:
         # Flatten -> Shape (N*3, C, H, W)
         interleaved = stacked.flatten(0, 1)
 
-        print(stacked.shape)
         # 3. Create Grid
         # nrow=3 forces the layout: [Input, Prediction, Truth] per row
         grid = make_grid(
@@ -170,6 +178,17 @@ class DehazeTrainer:
             state_dict = {f"module.{k}": v for k, v in state_dict.items()}
         
         self.model.load_state_dict(state_dict, strict=True)
+
+        if "ema_model" in checkpoint:
+            # EMA usually wraps the raw model, so we load carefully
+            try: 
+                self.ema_model.load_state_dict(checkpoint['ema_model'])
+                if is_main_process():
+                    self.console.print("[dim]EMA weights loaded successfully.[/]")
+            except Exception as e:
+                if is_main_process():
+                    self.console.print(f"[bold red]EMA Load Failed: {e}[/]")
+                    
         
         if "optimizer" in checkpoint:
             self.optimizer.load_state_dict(checkpoint["optimizer"])
@@ -191,19 +210,30 @@ class DehazeTrainer:
             return
         
         # Save raw_model state_dict for portability
-        ckpt = {
-            "epoch": self.epoch,
-            "model": self.raw_model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "scheduler": self.scheduler.state_dict(),
-            "config": self.cfg,
-        }
+
+        if self.scheduler is not None:
+            ckpt = {
+                "epoch": self.epoch,
+                "model": self.raw_model.state_dict(),
+                "ema_model": self.ema_model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "scheduler": self.scheduler.state_dict(),
+                "config": self.cfg,
+            }
+        else:
+            ckpt = {
+                "epoch": self.epoch,
+                "model": self.raw_model.state_dict(),
+                "ema_model": self.ema_model.state_dict(),
+                "optimizer": self.optimizer.state_dict(),
+                "config": self.cfg,
+            }
         
         torch.save(ckpt, path)
         if not is_best:
             self.console.print(f"[dim]Saved checkpoint: {os.path.basename(path)}[/]")
 
-    def train_epoch(self, loader):
+    def train_epoch(self, loader, max_epochs):
         self.model.train()
         self.train_metrics.reset()
         
@@ -226,17 +256,23 @@ class DehazeTrainer:
 
             self.optimizer.zero_grad(set_to_none=True)
             
-            with torch.amp.autocast("cuda"):
+            with torch.amp.autocast("cuda", dtype = self.amp_dtype):
                 preds = self.model(x_t, t)
                 loss, loss_dict = self.criterion(
                     preds, target_v=target_v, x_t=x_t, timestep=t,
-                    clean_img=clean_img, hazy_img=hazy_img
+                    clean_img=clean_img, hazy_img=hazy_img,
+                    current_epoch = self.epoch, total_epochs = max_epochs
                 )
+		
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
 
-            self.scalar.scale(loss).backward()
-            self.scalar.step(self.optimizer)
-            self.scalar.update()
-
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm = 1.0)
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.ema_model.update_parameters(self.model)
+            
             self.train_metrics["Loss_Total"].update(loss.detach())
             self.train_metrics["Loss_Flow"].update(loss_dict["Flow"])
             self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
@@ -256,23 +292,38 @@ class DehazeTrainer:
         if is_main_process():
             progress.stop()
 
-        self.scheduler.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+            
         return self.train_metrics.compute()
         
     @torch.no_grad()
-    def eval_epoch(self, loader, log_tag="Validation_Samples/Hazy_Vs_Pred_Vs_Clean", step=None):
-        self.model.eval()
+    def eval_epoch(self, loader, log_tag="Validation_Samples/Hazy_Vs_Pred_Vs_Clean", 
+                   step=None, use_ema = True):
+        """
+        Modified to use EMA weights for validation if use_ema=True.
+        """
         self.eval_metrics.reset()
 
         current_step = step if step is not None else self.epoch
-        desc = "Final Test" if "Final" in log_tag else f"Epoch {self.epoch} [Eval]"
+
+        # Switching for EMA model for evaluation
+        if use_ema:
+            eval_model = self.ema_model.module
+            desc_suffix = "[EMA]"
+        else:
+            eval_model = self.raw_model
+            desc_suffix = "[Raw]"
+            
+        eval_model.eval()
+        self.ode_solver.model = eval_model
+        
+        desc = "Final Test" if "Final" in log_tag else f"Epoch {self.epoch} [Eval] {desc_suffix}"
         progress = self._get_progress_bar() if is_main_process() else None
 
         # --- RANDOM SELECTION SETUP ---
         visuals_buffer = {"hazy": [], "clean": [], "pred": []}
         target_batch_indices = set()
-
-        # Define a fixed size for visualization to prevent shape mismatches
         VIZ_SIZE = (256, 256)
             
         if is_main_process():
@@ -355,6 +406,10 @@ class DehazeTrainer:
             os.makedirs(save_dir, exist_ok=True)
             self.console.print(f"[bold]Training from Epoch {self.epoch} to {max_epochs}[/bold]")
 
+        # --- EARLY STOPPING SETUP ---
+        # Get patiencce from config, default to 15 if not set
+        patience_limit = getattr(self.cfg.TRAIN, "PATIENCE", 15)
+        patience_counter = 0
         best_psnr = 0.0
         
         for epoch in range(self.epoch, max_epochs + 1):
@@ -365,15 +420,19 @@ class DehazeTrainer:
                 self.writer.add_scalar("Train/LR", current_lr, epoch)
                 
             # 1. Train
-            train_res = self.train_epoch(train_loader)
+            train_res = self.train_epoch(train_loader, max_epochs = max_epochs)
             
             if is_main_process():
                 for k, v in train_res.items(): 
                     self.writer.add_scalar(f"Train/{k}", v, epoch)
 
             # 2. Eval
+            should_stop = False
+            
             if epoch % self.cfg.EVAL.EVAL_INTERVAL == 0 or epoch == max_epochs:
-                val_res = self.eval_epoch(val_loader, log_tag="Validation_Samples/Hazy_Vs_Pred_Vs_Clean")
+                val_res = self.eval_epoch(val_loader, 
+                        log_tag="Validation_Samples/Hazy_Vs_Pred_Vs_Clean",
+                        use_ema = True)
                 
                 if is_main_process():
                     self.writer.add_scalar("Eval/PSNR", val_res['PSNR'], epoch)
@@ -387,9 +446,28 @@ class DehazeTrainer:
                     table.add_row("SSIM", f"{val_res['SSIM'].item():.2f}")
                     self.console.print(table)
 
-                    if val_res['PSNR'].item() > best_psnr:
-                        best_psnr = val_res['PSNR'].item()
+                    current_psnr = val_res['PSNR'].item()
+                    if current_psnr > best_psnr:
+                        best_psnr = current_psnr
+                        last_best_epoch = epoch
+                        
                         self.save_checkpoint(os.path.join(save_dir, "best.pt"), is_best=True)
+                        self.console.print(f"[bold green]New Best PSNR: {best_psnr:.2f} (Epoch {epoch})[/]")
+                    else:
+                        epoch_no_improve = epoch - last_best_epoch
+                        self.console.print(f"[bold yellow]No improvement for {epochs_no_improve} epochs. (Patience: {patience_limit})[/]")
+                        if epochs_no_improve >= patience_limit:
+                            self.console.print(f"[bold red]Early Stopping Triggered! (Best was Epoch {last_best_epoch})[/]")
+                            should_stop = True
+
+            # --- SYNCHRONIZE STOP SIGNAL ---
+            if self.is_distributed:
+                stop_tensor = torch.tensor(1 if should_stop else 0, device=self.device)
+                dist.broadcast(stop_tensor, src = 0)
+                should_stop = stop_tensor.item() == 1
+
+            if should_stop:
+                break
             
             # 3. Save Latest
             self.save_checkpoint(os.path.join(save_dir, "latest.pt"))
@@ -420,11 +498,11 @@ class DehazeTrainer:
             self.console.print("[bold yellow]Warning: 'best.pt' not found. Using current weights.[/]")
 
         # 3. Run Eval with UNIQUE Tag
-        final_res = self.eval_epoch(loader, log_tag="Final_Best_Model/Samples", step=final_step)
+        final_res = self.eval_epoch(loader, log_tag="Final_Best_Model/Samples", step=final_step, use_ema = True)
 
         # 4. Final Report
         if is_main_process():
-            table = Table(title="FINAL TEST RESULTS (Best Model)")
+            table = Table(title="FINAL TEST RESULTS (Best Model / EMA)")
             table.add_column("Metric", style="magenta", justify="center")
             table.add_column("Value", style="green", justify="center")
 

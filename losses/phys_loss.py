@@ -190,7 +190,7 @@ class FM_PhysicalLoss(nn.Module):
         dx = img[:, :, :, 1:] - img[:, :, :, :-1]
         return dy, dx
     
-    def forward(self, pred_tuple, target_v, x_t, timestep, clean_img, hazy_img):
+    def forward(self, pred_tuple, target_v, x_t, timestep, clean_img, hazy_img, current_epoch = None, total_epochs = 100):
         """
         Args:
             pred_tuple: (pred_v, t_map, A_pred) from Model
@@ -199,6 +199,15 @@ class FM_PhysicalLoss(nn.Module):
             timestep:   Scalar time (B,)
             clean_img:  Ground Truth Clean Image (Normalized [-1, 1])
             hazy_img:   Original Hazy Image (Normalized [-1, 1])
+
+        We want to add the epochs to schedule the density boost 
+            - In the begining, the transmission map needs to learn the basic structure, 
+              the model learns the global colors and shapes without being distracted by 
+              "hard" spots.
+            - The model notices that its "foggy predictions are incurring higher penalties. 
+                it starts to sharpening the transmission map to reduce that penalty
+            - The model is essentially performing "Hard Example Mining" focusing 
+               exclusively on the thickest haze regions where it is struggling 
         """
         
         # Unpack predictions 
@@ -216,12 +225,37 @@ class FM_PhysicalLoss(nn.Module):
         # --- A. VELOCITY LOSS (Density-Aware) --- 
         # Calculate raw squared error per pixel
         raw_v_loss = self.mse_none(pred_v, target_v)
+
+        # Calculate the Adaptive Boost Scaler
+        # Goal: Start with 0 boost (pure MSE) for stability, end with max boost for enhancing detail
+        max_boost = self.weights["density_boost"]
+
+        if current_epoch is not None:
+            # Normalize progress to [0.0, 1.0]
+            progress = current_epoch / float(total_epochs)
+            # In case the current epoch is larger than the total epochs (put that for the safety reason)
+            progress = max(0.0, min(progress, 1.0))
+
+            # Squared Ramp (x^2)
+            # Stays low longer to let the model stabilize, then ramps up 
+            adaptive_scalar = progress ** 2
+            current_boost = adaptive_scalar * max_boost
+        else:
+            # We will use the default max_boost if there is no input from the user
+            current_boost = max_boost
+
         
         # Create Weight Map based on Transmission Prediction
         # Low t (Dense Haze) -> High Weight. High t (Clear) -> Low Weight.
+        
         # We .detach() t_map so velocity loss doesn't try to "hack" the physics head.
-        t_guide = pred_t_map.detach().mean(dim=1, keepdim=True)
-        pixel_weight = 1.0 + self.weights["density_boost"] * (1.0 - t_guide)
+        t_guide = pred_t_map.detach().mean(dim = 1, keepdim = True)
+
+        # This is the formula for the Focus Mechanism.
+        # If you think this pixel is thick fog ~ 0.0, pay more attention to that pixel
+        # to fix the velocity here 
+        pixel_weight = 1.0 + current_boost * (1.0 - t_guide)
+
         
         # Apply Weight and Mean
         loss_v = (raw_v_loss * pixel_weight).mean()

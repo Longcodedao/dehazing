@@ -1,14 +1,16 @@
 SCHEDULE:
   - RESOLUTION: 256 
-    EPOCHS: 100
-    BATCH_SIZE: 32
-
-  - RESOLUTION: 512 
-    EPOCHS: 50
-    BATCH_SIZE: 8
+    EPOCHS: 150
+    BATCH_SIZE: 16 
+    
     
 SCHEDULER:
+    TYPE: Cosine
     WARMUP_EPOCHS: 10
+    # TYPE: Fixed
+
+OPTIM:
+    LR: 0.0002
 
 LOSS:
     W_FLOW: 1.0
@@ -17,4 +19,4 @@ LOSS:
     W_TV: 0.01
     W_ATM: 0.01 
     W_FFT: 0.01 
-    DENSITY_BOOST: 2.0
+    DENSITY_BOOST: 2.5

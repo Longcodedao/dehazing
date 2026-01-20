@@ -1,11 +1,21 @@
 SCHEDULE:
   - RESOLUTION: 256 
-    EPOCHS: 30
+    EPOCHS: 50
     BATCH_SIZE: 64
+    
 SCHEDULER:
+    TYPE: Fixed
     WARMUP_EPOCHS: 5
     
 # 5e-5 = 0.00005
 OPTIM:
     LR: 0.00005 
 
+LOSS:
+    W_FLOW: 1.0
+    W_PERC: 0.2
+    W_PHYS: 0.2
+    W_TV: 0.01
+    W_ATM: 0.01 
+    W_FFT: 0.01 
+    DENSITY_BOOST: 2.5

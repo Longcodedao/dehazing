@@ -1,7 +1,7 @@
 SCHEDULE:
   - RESOLUTION: 256 
     EPOCHS: 150
-    BATCH_SIZE: 16 
+    BATCH_SIZE: 16
     
     
 SCHEDULER:

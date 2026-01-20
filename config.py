@@ -56,7 +56,7 @@ _C.LOSS.DENSITY_BOOST = 5.0
 
 # --- Evaluation ---
 _C.EVAL = CN()
-_C.EVAL.EVAL_INTERVAL = 5
+_C.EVAL.EVAL_INTERVAL = 1
 # I always set batch size = 1 in eval batch size
 _C.EVAL.BATCH_SIZE = 16 
 

@@ -1,17 +1,12 @@
 VERSION: "large"
-BASE_DIM: 112            # Keep high channel count for capacity
-DIM_MULTS: [1, 2, 4, 8] # 4 Scales: 256->128->64->32
+BASE_DIM: 96             # The "Gold Standard" width
+DIM_MULTS: [1, 2, 4, 8]  # Scales up to 768 channels
 
 PHYSICS_GUIDED: True
 
-# [0, 2, 6, 8]
-# Stage 1 (256x): 0 Blocks (Pure Conv, fast downsampling)
-# Stage 2 (128x): 2 Blocks
-# Stage 3 (64x):  6 Blocks (Heavy feature processing)
-# Stage 4 (32x):  8 Blocks (The Bottleneck / Deepest abstract reasoning)
-ENCODER_BLOCKS: [0, 2, 6, 8] 
-
-# Mirror for Decoder
-DECODER_BLOCKS: [0, 2, 6, 8]
+# The "Diamond" Depth Structure
+# Shallow at start/end, deep in the middle/bottleneck
+ENCODER_BLOCKS: [0, 2, 4, 6] 
+DECODER_BLOCKS: [0, 2, 4, 6]
 
 TIME_DIM_MULT: 4

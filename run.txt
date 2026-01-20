@@ -57,3 +57,16 @@ python3 evaluate.py \
   --data_root dataset \
   --datasets RESIDE-INDOOR RESIDE-OUTDOOR \
   --nfe 10
+
+
+
+python3  main.py \
+  --seed 42 \
+  --model-config "large" \
+  --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
+  --dataset_root "dataset" \
+  --dataset_name "RESIDE-INDOOR" \
+  --log_dir "logs/FM_PhysicMamba_UNET_Version2_Large" \
+  --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_Version2_Large" \
+  --num_workers 4 \
+  --gradient-checkpointing

@@ -201,12 +201,13 @@ class FM_PhysMamba_UNET(nn.Module):
         self.physics_guided = self.cfg.PHYSICS_GUIDED
         enc_blocks_list = self.cfg.ENCODER_BLOCKS
         dec_blocks_list = self.cfg.DECODER_BLOCKS
-        num_mid_blocks = enc_blocks_list[-1] if len(enc_blocks_list) >= len(self.dims) else 2
 
         self.use_version = use_version 
         self.use_checkpoint = gradient_checkpointing # <--- New Flag
         self.dims = [base_dim * m for m in dim_mults]
-        
+
+        num_mid_blocks = enc_blocks_list[-1] if len(enc_blocks_list) >= len(self.dims) else 2
+
         # --- Time & Physics Embedding ---
         time_dim = base_dim * self.cfg.TIME_DIM_MULT
         self.time_mlp = nn.Sequential(
@@ -249,6 +250,8 @@ class FM_PhysMamba_UNET(nn.Module):
         # self.mid_block1 = PhysBiMambaBlock(mid_dim)
         # self.mid_block2 = PhysBiMambaBlock(mid_dim)
 
+        mid_dim = self.dims[-1]
+        self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
         self.mid_blocks = nn.ModuleList()
         for _ in range(num_mid_blocks):
             self.mid_blocks.append(PhysBiMambaBlock(mid_dim))

@@ -49,18 +49,20 @@ torchrun --nproc_per_node=2 main.py \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_finetune" \
   --pretrained_model checkpoints/FM_PhysicMamba_UNET_DDP/stage_0_res256/best.pt \
   --num_workers 4 \
-  --gradient-checkpointing
+  --gradient-checkpointing \
+
 
 
 python3 evaluate.py \
-  --checkpoint checkpoints/FM_PhysicMamba_UNET_finetune/stage_0_res256/latest.pt \
+  --model_size large \
+  --checkpoint checkpoints/FM_PhysicMamba_UNET_Version2_Large/stage_0_res256/best.pt \
   --data_root dataset \
-  --datasets RESIDE-INDOOR RESIDE-OUTDOOR \
+  --datasets RESIDE-INDOOR \
   --nfe 10
 
 
 
-python3  main.py \
+torchrun --nproc_per_node=4 main.py \
   --seed 42 \
   --model-config "large" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule.yaml" \
@@ -69,4 +71,5 @@ python3  main.py \
   --log_dir "logs/FM_PhysicMamba_UNET_Version2_Large" \
   --checkpoint_dir "checkpoints/FM_PhysicMamba_UNET_Version2_Large" \
   --num_workers 4 \
-  --gradient-checkpointing
+  --gradient-checkpointing \
+  --resume "checkpoints/FM_PhysicMamba_UNET_Version2_Large/stage_0_res256/latest.pt"

@@ -454,7 +454,7 @@ class DehazeTrainer:
                         self.save_checkpoint(os.path.join(save_dir, "best.pt"), is_best=True)
                         self.console.print(f"[bold green]New Best PSNR: {best_psnr:.2f} (Epoch {epoch})[/]")
                     else:
-                        epoch_no_improve = epoch - last_best_epoch
+                        epochs_no_improve = epoch - last_best_epoch
                         self.console.print(f"[bold yellow]No improvement for {epochs_no_improve} epochs. (Patience: {patience_limit})[/]")
                         if epochs_no_improve >= patience_limit:
                             self.console.print(f"[bold red]Early Stopping Triggered! (Best was Epoch {last_best_epoch})[/]")

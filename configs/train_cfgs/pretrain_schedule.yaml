@@ -1,16 +1,20 @@
 SCHEDULE:
   - RESOLUTION: 256 
-    EPOCHS: 150
+    EPOCHS: 125
     BATCH_SIZE: 16
-    
+
+  # - RESOLUTION: 512 
+  #   EPOCHS: 5
+  #   BATCH_SIZE: 8
     
 SCHEDULER:
     TYPE: Cosine
     WARMUP_EPOCHS: 10
     # TYPE: Fixed
-
+    
 OPTIM:
     LR: 0.0002
+    # LR: 0.00005
 
 LOSS:
     W_FLOW: 1.0

@@ -28,7 +28,9 @@ _C.TRAIN = CN()
 _C.TRAIN.BATCH_SIZE = 16
 _C.TRAIN.EPOCHS = 100
 _C.TRAIN.RESUME_PATH = ""
-_C.TRAIN.PATIENCE: 15 
+_C.TRAIN.PATIENCE = 15 
+# Default for training set (Only turns if the dataset size is small)
+_C.TRAIN.STEPS_PER_EPOCH = 0
 
 # --- Optimization ---
 _C.OPTIM = CN()

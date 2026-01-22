@@ -76,7 +76,7 @@ torchrun --nproc_per_node=4 main.py \
 
 
 ## --- Training NH-HAZE ---- 
-python3 main.py \
+torchrun --nproc_per_node=2 main.py \
   --seed 42 \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule_NH-HAZE.yaml" \
@@ -85,5 +85,7 @@ python3 main.py \
   --log_dir "logs/NHHAZE_FM_PhysicMamba_UNET_Version2_Small" \
   --checkpoint_dir "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small" \
   --num_workers 4 \
-  --gradient-checkpointing \
   --resume "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small/stage_0_res256/latest.pt"
+
+
+  --gradient-checkpointing \

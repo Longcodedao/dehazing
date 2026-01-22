@@ -10,3 +10,4 @@ from .reside_outdoor import RESIDE_Outdoor, RESIDE_SOTS_Outdoor
 from .haze4k import Haze4k_Dataset
 from .ohaze import OHAZE_Dataset
 from .densehaze import DENSE_Haze_Dataset
+from .nhhaze import NH_Haze_Dataset

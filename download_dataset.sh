@@ -94,18 +94,18 @@ kaggle datasets download -d balraj98/synthetic-objective-testing-set-sots-reside
 
 # ---
 
-# 2. Haze4K
-# The Kaggle CLI will create folders for Haze4K-T and Haze4K-V based on the dataset name.
-# We direct the download to a subfolder named 'haze4k' inside the root 'dataset' folder.
+# # 2. Haze4K
+# # The Kaggle CLI will create folders for Haze4K-T and Haze4K-V based on the dataset name.
+# # We direct the download to a subfolder named 'haze4k' inside the root 'dataset' folder.
 
-echo "Downloading: Haze4K-T (for training) and Haze4K-V (for validation)..."
-HAZE4K_PATH="$ROOT_DATASET/haze4k"
-mkdir -p "$HAZE4K_PATH"
+# echo "Downloading: Haze4K-T (for training) and Haze4K-V (for validation)..."
+# HAZE4K_PATH="$ROOT_DATASET/haze4k"
+# mkdir -p "$HAZE4K_PATH"
 
-kaggle datasets download -d qwertydbooze/haze4k-t \
-      --unzip -p "$HAZE4K_PATH"
-kaggle datasets download -d qwertydbooze/haze4k-v \
-      --unzip -p "$HAZE4K_PATH"
+# kaggle datasets download -d qwertydbooze/haze4k-t \
+#       --unzip -p "$HAZE4K_PATH"
+# kaggle datasets download -d qwertydbooze/haze4k-v \
+#       --unzip -p "$HAZE4K_PATH"
 
 # ---
 
@@ -120,14 +120,25 @@ kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
 
 # ---
 
-# 4. O-Haze 
-FOLDER_NAME="o-haze"
+# # 4. O-Haze 
+# FOLDER_NAME="o-haze"
+# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+
+# echo "Downloading: O-Haze..."
+# mkdir -p "$TARGET_PATH"
+# kaggle datasets download -d philiphofmann/o-haze \
+#       --unzip -p "$TARGET_PATH"
+
+# ---
+
+# 5. NH-HAZE
+FOLDER_NAME="nh-haze"
 TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "Downloading: O-Haze..."
+echo "Downloading: NH-HAZE..."
 mkdir -p "$TARGET_PATH"
-kaggle datasets download -d philiphofmann/o-haze \
-      --unzip -p "$TARGET_PATH"
+kaggle datasets download -d litheshshetty/nh-haze \
+        --unzip -p "$TARGET_PATH"
 
 # ---
 

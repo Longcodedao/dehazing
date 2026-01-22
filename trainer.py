@@ -296,6 +296,93 @@ class DehazeTrainer:
             self.scheduler.step()
             
         return self.train_metrics.compute()
+
+    # ------------------------------------------------------------------
+    # NEW FUNCTION: Inflated Training Loop for Small Datasets (NH/Dense-Haze)
+    # ------------------------------------------------------------------
+    def train_epoch_inflated(self, loader, max_epochs, steps_per_epoch):
+        self.model.train()
+        self.train_metrics.reset()
+        
+        # Create an infinite iterator logic
+        loader_iter = iter(loader)
+        restart_count = 0
+
+        # Initial DDP Seed Setup
+        if self.is_distributed and hasattr(loader.sampler, "set_epoch"):
+            loader.sampler.set_epoch(self.epoch)
+
+        progress = self._get_progress_bar() if is_main_process() else None
+        if is_main_process():
+            progress.start()
+            # Note: Total is now fixed to steps_per_epoch, not len(loader)
+            task_id = progress.add_task(
+                f"Epoch {self.epoch} [Inflated Train]", 
+                total=steps_per_epoch, 
+                info="Init..."
+            )
+
+        for step in range(steps_per_epoch):
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                restart_count += 1
+                if self.is_distributed and hasattr(loader.sampler, "set_epoch"):
+                    loader.sampler.set_epoch(self.epoch + restart_count)
+
+                loader_iter = iter(loader)
+                batch = next(loader_iter)
+
+            # Start training procedure
+            clean_img, hazy_img = batch
+            clean_img = clean_img.to(self.device, non_blocking=True)
+            hazy_img = hazy_img.to(self.device, non_blocking=True)
+            
+            t = torch.rand(clean_img.shape[0], device=self.device)
+            x_t, target_v = path_sampler(hazy_img, clean_img, t)
+
+            self.optimizer.zero_grad(set_to_none=True)
+            
+            with torch.amp.autocast("cuda", dtype=self.amp_dtype):
+                preds = self.model(x_t, t)
+                loss, loss_dict = self.criterion(
+                    preds, target_v=target_v, x_t=x_t, timestep=t,
+                    clean_img=clean_img, hazy_img=hazy_img,
+                    current_epoch=self.epoch, total_epochs=max_epochs
+                )
+        
+            self.scaler.scale(loss).backward()
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.ema_model.update_parameters(self.model)
+            
+            # --- 3. Logging ---
+            self.train_metrics["Loss_Total"].update(loss.detach())
+            self.train_metrics["Loss_Flow"].update(loss_dict["Flow"])
+            self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
+            self.train_metrics["Loss_VGG"].update(loss_dict["VGG"])
+            self.train_metrics["Loss_FFT"].update(loss_dict["FFT"])
+
+            if is_main_process():
+                info_str = (
+                    f"L:{loss.item():.3f} "
+                    f"| F:{loss_dict['Flow']:.3f} "
+                    f"P:{loss_dict['Phys']:.3f} "
+                )
+                progress.update(task_id, advance=1, info=info_str)
+                
+        if is_main_process():
+            progress.stop()
+
+        # Step scheduler once per INFLATED epoch
+        if self.scheduler is not None:
+            self.scheduler.step()
+            
+        return self.train_metrics.compute()
+        
         
     @torch.no_grad()
     def eval_epoch(self, loader, log_tag="Validation_Samples/Hazy_Vs_Pred_Vs_Clean", 
@@ -406,8 +493,16 @@ class DehazeTrainer:
             os.makedirs(save_dir, exist_ok=True)
             self.console.print(f"[bold]Training from Epoch {self.epoch} to {max_epochs}[/bold]")
 
+        # CHECK FOR INFLATED SETTING
+        # We look for cfg.TRAIN.STEPS_PER_EPOCH. If None, use standard training.
+        steps_per_epoch = getattr(self.cfg.TRAIN, "STEPS_PER_EPOCH", None)
+        if steps_per_epoch:
+             if is_main_process():
+                 self.console.print(Panel(f"[bold cyan]Inflated Mode Active: {steps_per_epoch} steps/epoch[/]", title="Config"))
+    
+        
         # --- EARLY STOPPING SETUP ---
-        # Get patiencce from config, default to 15 if not set
+        # Get patience from config, default to 15 if not set
         patience_limit = getattr(self.cfg.TRAIN, "PATIENCE", 15)
         patience_counter = 0
         best_psnr = 0.0
@@ -420,7 +515,10 @@ class DehazeTrainer:
                 self.writer.add_scalar("Train/LR", current_lr, epoch)
                 
             # 1. Train
-            train_res = self.train_epoch(train_loader, max_epochs = max_epochs)
+            if steps_per_epoch and steps_per_epoch > 0:
+                train_res = self.train_epoch_inflated(train_loader, max_epochs, steps_per_epoch)
+            else:
+                train_res = self.train_epoch(train_loader, max_epochs = max_epochs)
             
             if is_main_process():
                 for k, v in train_res.items(): 

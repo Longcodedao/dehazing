@@ -17,7 +17,8 @@ from data import (
     RESIDE_SOTS_Outdoor,
     Haze4k_Dataset, 
     OHAZE_Dataset,
-    DENSE_Haze_Dataset
+    DENSE_Haze_Dataset,
+    NH_Haze_Dataset
 )
 
 from data.utils import get_haze_transforms
@@ -119,6 +120,30 @@ def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):
             transform=val_transform,
         )
         
+    elif dataset_name == "NHHAZE":
+        if verbose: print(f"Loading NHHAZE...")
+        train_dataset = NH_Haze_Dataset(
+            root_dir=os.path.join(data_cfg.DATASET_ROOT, "nh-haze/NH-HAZE"),
+            split="train",
+            transform=train_transform,
+        )
+        val_dataset = NH_Haze_Dataset(
+            root_dir=os.path.join(data_cfg.DATASET_ROOT, "nh-haze/NH-HAZE"),
+            split="val",
+            transform=val_transform,
+        )
+    elif dataset_name == "DENSEHAZE":
+        if verbose: print("Loading DENSE-HAZE")
+        densehaze_dataset = DENSE_Haze_Dataset(
+            os.path.join(data_cfg.DATASET_ROOT, "dense-haze"),
+        )
+        train_dataset, val_dataset = partition_dataset(
+            densehaze_dataset, 
+            train_transform, 
+            val_transform, 
+            train_ratio = 0.91
+        )
+        
     else:
         raise ValueError(f"Dataset {dataset_name} not supported in get_loaders_for_stage")
         
@@ -208,6 +233,12 @@ def get_eval_loader(
         dataset = DENSE_Haze_Dataset(
             root_dir=os.path.join(dataset_root, "dense-haze"),
             transform=val_transform
+        )
+    elif name_upper == "NH-HAZE":
+        dataset = NH_Haze_Dataset(
+            root_dir=os.path.join(dataset_root, "nh-haze/NH-HAZE"),
+            transform=val_transform,
+            split = "test"
         )
     else:
         raise ValueError(f"Unknown evaluation dataset: {dataset_name}")

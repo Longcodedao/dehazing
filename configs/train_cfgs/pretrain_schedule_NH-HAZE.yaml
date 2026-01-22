@@ -1,6 +1,6 @@
 SCHEDULE:
   - RESOLUTION: 256 
-    EPOCHS: 150
+    EPOCHS: 300
     BATCH_SIZE: 16
 
   # - RESOLUTION: 512 
@@ -9,7 +9,7 @@ SCHEDULE:
     
 SCHEDULER:
     TYPE: Cosine
-    WARMUP_EPOCHS: 10
+    WARMUP_EPOCHS: 30
     # TYPE: Fixed
     
 OPTIM:
@@ -24,3 +24,8 @@ LOSS:
     W_ATM: 0.01 
     W_FFT: 0.01 
     DENSITY_BOOST: 3.5
+
+TRAIN:
+    STEPS_PER_EPOCH: 200
+    PATIENCE: 50
+    

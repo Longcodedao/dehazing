@@ -82,10 +82,10 @@ torchrun --nproc_per_node=2 main.py \
   --pretrain-config "configs/train_cfgs/pretrain_schedule_NH-HAZE.yaml" \
   --dataset_root "dataset" \
   --dataset_name "NHHAZE" \
-  --log_dir "logs/NHHAZE_FM_PhysicMamba_UNET_Version2_Small" \
-  --checkpoint_dir "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small" \
+  --log_dir "logs/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2" \
+  --checkpoint_dir "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2" \
   --num_workers 4 \
-  --resume "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small/stage_0_res256/latest.pt"
+  --resume "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2/stage_0_res256/latest.pt"
 
 
   --gradient-checkpointing \

@@ -505,7 +505,7 @@ class DehazeTrainer:
         # Get patience from config, default to 15 if not set
         patience_limit = getattr(self.cfg.TRAIN, "PATIENCE", 15)
         patience_counter = 0
-        best_psnr = 0.0
+        best_metric = 0.0
         
         for epoch in range(self.epoch, max_epochs + 1):
             self.epoch = epoch
@@ -544,13 +544,21 @@ class DehazeTrainer:
                     table.add_row("SSIM", f"{val_res['SSIM'].item():.2f}")
                     self.console.print(table)
 
-                    current_psnr = val_res['PSNR'].item()
-                    if current_psnr > best_psnr:
-                        best_psnr = current_psnr
+                    metric_early_stopping = self.cfg.EVAL.METRIC_EARLY_STOPPING 
+                    
+                    if metric_early_stopping == "PSNR":
+                        current_metric = val_res['PSNR'].item()
+                    elif metric_early_stopping == "SSIM":
+                        current_metric = val_res['SSIM'].item()
+                    else: 
+                        raise ValueError("Supporting only for PSNR and SSIM metric for early stopping")
+                        
+                    if current_metric > best_metric:
+                        best_metric = current_metric
                         last_best_epoch = epoch
                         
                         self.save_checkpoint(os.path.join(save_dir, "best.pt"), is_best=True)
-                        self.console.print(f"[bold green]New Best PSNR: {best_psnr:.2f} (Epoch {epoch})[/]")
+                        self.console.print(f"[bold green]New Best {metric_early_stopping}: {best_metric:.2f} (Epoch {epoch})[/]")
                     else:
                         epochs_no_improve = epoch - last_best_epoch
                         self.console.print(f"[bold yellow]No improvement for {epochs_no_improve} epochs. (Patience: {patience_limit})[/]")

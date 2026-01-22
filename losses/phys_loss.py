@@ -124,7 +124,8 @@ class FM_PhysicalLoss(nn.Module):
             # Squared Ramp (x^2)
             # Stays low longer to let the model stabilize, then ramps up 
             adaptive_scalar = progress ** 2
-            current_boost = adaptive_scalar * max_boost
+            current_boost = adaptive_scalar * max_boost 
+        
         else:
             # We will use the default max_boost if there is no input from the user
             current_boost = max_boost

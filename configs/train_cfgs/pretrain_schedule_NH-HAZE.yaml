@@ -1,7 +1,7 @@
 SCHEDULE:
   - RESOLUTION: 256 
     EPOCHS: 300
-    BATCH_SIZE: 16
+    BATCH_SIZE: 4
 
   # - RESOLUTION: 512 
   #   EPOCHS: 5
@@ -21,11 +21,13 @@ LOSS:
     W_PERC: 0.2
     W_PHYS: 0.2
     W_TV: 0.01
-    W_ATM: 0.01 
-    W_FFT: 0.01 
-    DENSITY_BOOST: 3.5
+    W_ATM: 0.00 
+    W_FFT: 0.05
+    DENSITY_BOOST: 10.0
 
 TRAIN:
     STEPS_PER_EPOCH: 200
     PATIENCE: 50
-    
+
+EVAL:
+    METRIC_EARLY_STOPPING: SSIM

@@ -59,6 +59,7 @@ _C.LOSS.DENSITY_BOOST = 5.0
 # --- Evaluation ---
 _C.EVAL = CN()
 _C.EVAL.EVAL_INTERVAL = 5
+_C.EVAL.METRIC_EARLY_STOPPING = "PSNR"
 
 
 # --- Progressive Training Schedule ---

@@ -73,6 +73,41 @@ class PhysConvNeXtBlock(nn.Module):
         return inp + x
 
 
+class LocalFeatureExtractor(nn.Module):
+    """ 
+    Adaptive Parallel Branch.
+    Uses Inverted Bottleneck (Expand -> Depthwise -> Project).
+    Automatically calculates padding to keep spatial dimensions constant.
+    """
+    def __init__(self, dim, kernel_size=3, expansion_factor=2, dilation=2):
+        super().__init__()
+        
+        hidden_dim = int(dim * expansion_factor)
+        
+        # Dynamic Padding Calculation:
+        # P = (dilation * (kernel_size - 1)) / 2
+        # This ensures the output size equals the input size.
+        padding = (dilation * (kernel_size - 1)) // 2
+        
+        self.net = nn.Sequential(
+            # 1. Pointwise Expansion
+            nn.Conv2d(dim, hidden_dim, kernel_size=1),
+            nn.GELU(),
+            
+            # 2. Adaptive Depthwise Conv
+            nn.Conv2d(hidden_dim, hidden_dim, 
+                      kernel_size=kernel_size, 
+                      padding=padding, 
+                      dilation=dilation,
+                      groups=hidden_dim), # Depthwise
+            nn.GELU(),
+            
+            # 3. Pointwise Projection
+            nn.Conv2d(hidden_dim, dim, kernel_size=1)
+        )
+
+    def forward(self, x):
+        return self.net(x)
         
 
 class PhysBiMambaBlock(nn.Module):
@@ -81,26 +116,38 @@ class PhysBiMambaBlock(nn.Module):
     Scans the image Forward AND Backward so the top-left pixel
     can 'see' the bottom-right pixel.
     """
-    def __init__(self, dim):
+    def __init__(self, dim, dropout = 0.05):
         super().__init__()
         self.norm = nn.LayerNorm(dim)
-        
-        self.mamba_fwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
-        self.mamba_bwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
 
-        # 2. THE FUSION LAYER (The upgrade)
-        # Takes both directions (dim * 2) and learns how to combine them back to (dim)
-        self.fusion_linear = nn.Linear(dim * 2, dim)
+        # --- Horizontal Mamba -----
+        self.mamba_h_fwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+        self.mamba_h_bwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+
+        # --- Vertical Mamba ---
+        self.mamba_v_fwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+        self.mamba_v_bwd = Mamba(d_model=dim, d_state=16, d_conv=4, expand=2)
+        
+        # Fuses Fwd+Bwd direction
+        self.fusion_linear = nn.Linear(dim * 4, dim)
+
+        self.local_conv = LocalFeatureExtractor(dim, 
+                                                kernel_size=3, 
+                                                dilation=1)
         
         # Optional: A Gate to let the network choose emphasis
-        self.fusion_gate = nn.Sequential(
+        self.mixer = nn.Sequential(
             nn.Linear(dim * 2, dim),
             nn.Sigmoid()
         )
-    def forward(self, x, t_emb=None):
+
+        self.out_proj = nn.Linear(dim, dim)
+        self.dropout = nn.Dropout(dropout)
         
+    def forward(self, x, t_emb=None):
         B, C, H, W = x.shape
         residual = x
+        
         x_flat = x.flatten(2).transpose(1, 2)
         x_norm = self.norm(x_flat)
 
@@ -108,17 +155,71 @@ class PhysBiMambaBlock(nn.Module):
             scale, shift = t_emb.chunk(2, dim=1)
             x_norm = x_norm * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
-        out_fwd = self.mamba_fwd(x_norm)
-        x_flip = torch.flip(x_norm, dims=[1])
-        out_bwd = self.mamba_bwd(x_flip)
-        out_bwd = torch.flip(out_bwd, dims=[1])
+        # ---------------------------------------------------------
+        # 2. HORIZONTAL SCANS (Raster Order)
+        # ---------------------------------------------------------
+        # Forward ->
+        out_h_fwd = self.mamba_h_fwd(x_norm)
         
-        combined = torch.cat([out_fwd, out_bwd], dim=-1)
-        z = self.fusion_gate(combined)
-        x_fused = self.fusion_linear(combined)
-        x_out = (x_fused * z).transpose(1, 2).view(B, C, H, W)
-        return residual + x_out
+        # Backward <-
+        x_flip = torch.flip(x_norm, dims=[1])
+        out_h_bwd = self.mamba_h_bwd(x_flip)
+        out_h_bwd = torch.flip(out_h_bwd, dims=[1]) # Flip back
 
+        # ---------------------------------------------------------
+        # 3. VERTICAL SCANS (Column-Major Order)
+        # ---------------------------------------------------------
+        # Reshape to Image -> Transpose (Swap H and W) -> Flatten
+        # Result: (B, W*H, C). Now 'neighbors' in seq are vertical neighbors.
+        x_v_img = x_norm.view(B, H, W, C).permute(0, 2, 1, 3) 
+        x_v_flat = x_v_img.flatten(1, 2)
+        
+        # Down v
+        out_v_fwd = self.mamba_v_fwd(x_v_flat)
+        
+        # Up ^
+        x_v_flip = torch.flip(x_v_flat, dims=[1])
+        out_v_bwd = self.mamba_v_bwd(x_v_flip)
+        out_v_bwd = torch.flip(out_v_bwd, dims=[1])
+        
+        # Un-Transpose Vertical Outputs back to Horizontal Order
+        # (B, W*H, C) -> (B, W, H, C) -> (B, H, W, C) -> (B, L, C)
+        out_v_fwd = out_v_fwd.view(B, W, H, C).permute(0, 2, 1, 3).flatten(1, 2)
+        out_v_bwd = out_v_bwd.view(B, W, H, C).permute(0, 2, 1, 3).flatten(1, 2)
+        
+        ## ---------------------------------------------------------
+        # 4. Global Fusion
+        # ---------------------------------------------------------
+        # Combine all 4 views of the image
+        global_feat = self.fusion_linear(
+            torch.cat([out_h_fwd, out_h_bwd, out_v_fwd, out_v_bwd], dim=-1)
+        )
+
+        # ---------------------------------------------------------
+        # 5. Local Branch (Conv)
+        # ---------------------------------------------------------
+        # Reshape for Conv2d
+        x_img_norm = x_norm.transpose(1, 2).view(B, C, H, W)
+        local_feat = self.local_conv(x_img_norm)
+        local_feat = local_feat.flatten(2).transpose(1, 2)
+
+        
+        # ---------------------------------------------------------
+        # 6. Gated Output
+        # ---------------------------------------------------------
+        combined = torch.cat([global_feat, local_feat], dim=-1)
+        z = self.mixer(combined)
+        
+        fused = global_feat * z + local_feat * (1 - z)
+        
+        x_out = self.out_proj(fused)
+        
+        # Reshape to (B, C, H, W) for residual add
+        x_out = x_out.transpose(1, 2).view(B, C, H, W)
+        x_out = self.dropout(x_out)
+        
+        return residual + x_out
+        
         
 class GatedFusion(nn.Module):
     """
@@ -179,7 +280,7 @@ class PixelShuffleUpsample(nn.Module):
         
     def forward(self, x):
         return self.pixel_shuffle(self.conv(x))
-        
+
 
 
 class FM_PhysMamba_UNET(nn.Module):
@@ -243,12 +344,6 @@ class FM_PhysMamba_UNET(nn.Module):
             self.downs.append(blocks)
             self.downsamples.append(nn.Conv2d(dim_in, dim_out, 4, 2, 1)) 
 
-        # --- BOTTLENECK ---
-        # We will use for the small version
-        # mid_dim = self.dims[-1]
-        # self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
-        # self.mid_block1 = PhysBiMambaBlock(mid_dim)
-        # self.mid_block2 = PhysBiMambaBlock(mid_dim)
 
         mid_dim = self.dims[-1]
         self.mid_time_proj = nn.Linear(time_dim, mid_dim * 2)
@@ -327,13 +422,6 @@ class FM_PhysMamba_UNET(nn.Module):
             
         # 3. BOTTLENECK
         t_emb_mid = self.mid_time_proj(t_vec)
-        # We will use this for the small version
-        # if self.use_checkpoint and self.training:
-        #     h = checkpoint.checkpoint(self.mid_block1, h, t_emb_mid, use_reentrant=False)
-        #     h = checkpoint.checkpoint(self.mid_block2, h, t_emb_mid, use_reentrant=False)
-        # else:
-        #     h = self.mid_block1(h, t_emb_mid)
-        #     h = self.mid_block2(h, t_emb_mid)
 
         # We will adapt to this later (Maybe for the O-HAZE DENSE-HAZE Training)
         for block in self.mid_blocks:
@@ -369,4 +457,5 @@ class FM_PhysMamba_UNET(nn.Module):
             h = h * (1 + t_map)
             
         v_pred = self.final_conv(h)
+
         return v_pred, t_map, A_pred

@@ -1,7 +1,7 @@
 SCHEDULE:
   - RESOLUTION: 256 
     EPOCHS: 300
-    BATCH_SIZE: 4
+    BATCH_SIZE: 8
 
   # - RESOLUTION: 512 
   #   EPOCHS: 5
@@ -23,7 +23,9 @@ LOSS:
     W_TV: 0.01
     W_ATM: 0.00 
     W_FFT: 0.05
-    DENSITY_BOOST: 10.0
+    W_CR: 0.1
+    W_SSIM: 0.2
+    DENSITY_BOOST: 5.0
 
 TRAIN:
     STEPS_PER_EPOCH: 200

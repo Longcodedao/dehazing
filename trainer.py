@@ -29,6 +29,7 @@ from model import ODESolver, path_sampler
 from data.utils import restandardize_tensor
 import scheduler
 
+
 class DehazeTrainer:
     def __init__(self, cfg, model, criterion, local_rank):
         self.cfg = cfg
@@ -94,6 +95,7 @@ class DehazeTrainer:
             "Loss_Flow": MeanMetric(),
             "Loss_Phys": MeanMetric(),
             "Loss_VGG": MeanMetric(),
+            "Loss_CR": MeanMetric(),
             "Loss_FFT": MeanMetric()
         }).to(self.device)
         
@@ -278,6 +280,7 @@ class DehazeTrainer:
             self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
             self.train_metrics["Loss_VGG"].update(loss_dict["VGG"])
             self.train_metrics["Loss_FFT"].update(loss_dict["FFT"])
+            self.train_metrics["Loss_CR"].update(loss_dict["CR"])
 
             if is_main_process():
                 info_str = (
@@ -365,7 +368,8 @@ class DehazeTrainer:
             self.train_metrics["Loss_Phys"].update(loss_dict["Phys"])
             self.train_metrics["Loss_VGG"].update(loss_dict["VGG"])
             self.train_metrics["Loss_FFT"].update(loss_dict["FFT"])
-
+            self.train_metrics["Loss_CR"].update(loss_dict["CR"])
+            
             if is_main_process():
                 info_str = (
                     f"L:{loss.item():.3f} "

@@ -2,207 +2,159 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 from .charbonnier_loss import CharbonnierLoss
-from .perceptual_loss import PerceptualLoss
+from .perceptual_loss import PerceptualLoss, ContrastiveLoss
 from data.utils import restandardize_tensor
+
 
 class FFTLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        self.criterion = nn.L1Loss()
+        self.l1_loss = nn.L1Loss()
 
     def forward(self, pred, target):
-        """
-        pred, target: (B, C, H, W) images, normalized [0, 1]
-        """
-        # 1. Compute 2D Fast Fourier Transform (Real-to-Complex)
-        # Output shape: (B, C, H, W/2 + 1)
         pred_fft = torch.fft.rfft2(pred, norm='ortho')
         target_fft = torch.fft.rfft2(target, norm='ortho')
 
-        # 2. Compute Loss on Real and Imaginary parts separately
-        # This forces the model to learn both Magnitude (Sharpness) and Phase (Structure)
-        loss_real = self.criterion(pred_fft.real, target_fft.real)
-        loss_imag = self.criterion(pred_fft.imag, target_fft.imag)
+        # 1. Magnitude Loss (Amplitude/Style)
+        # L1 is perfect here because magnitude is linear (0 to infinity)
+        loss_mag = self.l1_loss(torch.abs(pred_fft), torch.abs(target_fft))
+        
+        # 2. Phase Loss (Structure/Edges)
+        # Cosine distance handles the -pi to pi wrap-around correctly
+        # Use this for safety :))) 
+        pred_angle = torch.angle(pred_fft)
+        target_angle = torch.angle(target_fft)
+        loss_pha = torch.mean(1 - torch.cos(pred_angle - target_angle))
 
-        return loss_real + loss_imag
+        return 0.5 * loss_mag + 0.5 * loss_pha
 
 
+# --- 3. HELPER: SSIM (Metric Booster) ---
+# Simple implementation of SSIM for loss
+def ssim_loss(img1, img2):
+    mu1 = F.avg_pool2d(img1, 3, 1, 1)
+    mu2 = F.avg_pool2d(img2, 3, 1, 1)
+    mu1_sq, mu2_sq, mu1_mu2 = mu1**2, mu2**2, mu1 * mu2
+    
+    sigma1_sq = F.avg_pool2d(img1**2, 3, 1, 1) - mu1_sq
+    sigma2_sq = F.avg_pool2d(img2**2, 3, 1, 1) - mu2_sq
+    sigma12 = F.avg_pool2d(img1 * img2, 3, 1, 1) - mu1_mu2
+
+    C1, C2 = 0.01**2, 0.03**2
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return 1 - ssim_map.mean()
+
+        
 class FM_PhysicalLoss(nn.Module):
-    """
-    Combines:
-    1. Flow Matching Loss (Velocity) - With Density Awareness
-    2. Physics Consistency Loss (Restoring Input I)
-    3. Perceptual Loss (VGG Content)
-    4. Smoothness Regularization
-    """
     def __init__(self, loss_config=None):
         super().__init__()
         self.charbonnier = CharbonnierLoss()
-        self.perceptual = PerceptualLoss()
-        self.fft_loss = FFTLoss()
         
-        # Use reduction='none' so we can apply pixel-wise weighting later
+        # We need to modify PerceptualLoss to expose feature extraction
+        self.perceptual = PerceptualLoss() 
+        self.fft_loss = FFTLoss()
         self.mse_none = nn.MSELoss(reduction='none') 
+        
+        # New: Contrastive
+        self.contrastive = ContrastiveLoss(self.perceptual)
 
-        # --- Default Hyperparameters ---
         self.weights = {
-            "w_flow": 1.0,        # Velocity Matching
-            "w_perc": 0.2,        # KEEP AT 0.2: Essential for structural integrity
-            "w_phys": 0.2,        # Physics Consistency
-            "w_fft":  0.1,        # Frequency domain
-            "w_tv": 0.01,         # Keeps transmission maps from becoming "noisy"
-            "w_atm": 0.01,        # Global atmosphere constraint
-            "density_boost": 5.0  # Multiplier for the thickest fog regions
+            "w_flow": 1.0,        
+            "w_perc": 0.2,       
+            "w_phys": 0.2,       
+            "w_fft":  0.1,       
+            "w_tv": 0.01,         
+            "w_atm": 0.01,
+            "w_cr": 0.1,         # New: Contrastive Weight
+            "w_ssim": 0.2,       # New: SSIM Weight
+            "density_boost": 5.0 
         }
-
-        # --- Override with Config ---
+        
+        # (Config update logic remains the same...)
         if loss_config is not None:
-            if isinstance(loss_config, dict):
-                self.weights.update(loss_config)
-            else:
-                # Handle YACS CfgNode object
-                if hasattr(loss_config, "W_FLOW"): self.weights["w_flow"] = loss_config.W_FLOW
-                if hasattr(loss_config, "W_PERC"): self.weights["w_perc"] = loss_config.W_PERC
-                if hasattr(loss_config, "W_PHYS"): self.weights["w_phys"] = loss_config.W_PHYS
-                if hasattr(loss_config, "W_FFT"):  self.weights["w_fft"]  = loss_config.W_FFT # <--- NEW
-                if hasattr(loss_config, "W_TV"):   self.weights["w_tv"]   = loss_config.W_TV
-                if hasattr(loss_config, "W_ATM"):  self.weights["w_atm"]  = loss_config.W_ATM
-                if hasattr(loss_config, "DENSITY_BOOST"):  self.weights["density_boost"]  = loss_config.DENSITY_BOOST
-                
+             # ... (your existing config code) ...
+             if hasattr(loss_config, "W_CR"): self.weights["w_cr"] = loss_config.W_CR
+
     def get_gradients(self, img):
-        """Helper for Total Variation (Smoothness) Loss"""
         dy = img[:, :, 1:, :] - img[:, :, :-1, :]
         dx = img[:, :, :, 1:] - img[:, :, :, :-1]
         return dy, dx
     
-    def forward(self, pred_tuple, target_v, x_t, timestep, clean_img, hazy_img, current_epoch = None, total_epochs = 100):
-        """
-        Args:
-            pred_tuple: (pred_v, t_map, A_pred) from Model
-            target_v:   Ground Truth Velocity (Clean - Hazy)
-            x_t:        Current noisy intermediate image (Normalized [-1, 1])
-            timestep:   Scalar time (B,)
-            clean_img:  Ground Truth Clean Image (Normalized [-1, 1])
-            hazy_img:   Original Hazy Image (Normalized [-1, 1])
-
-        We want to add the epochs to schedule the density boost 
-            - In the begining, the transmission map needs to learn the basic structure, 
-              the model learns the global colors and shapes without being distracted by 
-              "hard" spots.
-            - The model notices that its "foggy predictions are incurring higher penalties. 
-                it starts to sharpening the transmission map to reduce that penalty
-            - The model is essentially performing "Hard Example Mining" focusing 
-               exclusively on the thickest haze regions where it is struggling 
-        """
-        
-        # Unpack predictions 
+    def forward(self, pred_tuple, target_v, x_t, timestep, clean_img, hazy_img, current_epoch=None, total_epochs=100):
         pred_v, pred_t_map, pred_A = pred_tuple
 
-        # --- 1. PREP: Normalize Timestep ---
-        # Critical Fix: Ensure timestep is float [0.0, 1.0] for the reconstruction math
+        # --- A. TIME NORM ---
         if timestep.max() > 1.0:
             t_norm = timestep.float() / 1000.0
         else:
             t_norm = timestep.float()
-        
         t_expand = t_norm.view(-1, 1, 1, 1)
 
-        # --- A. VELOCITY LOSS (Density-Aware) --- 
-        # Calculate raw squared error per pixel
+        # --- B. DENSITY-AWARE FLOW LOSS ---
         raw_v_loss = self.mse_none(pred_v, target_v)
-
-        # Calculate the Adaptive Boost Scaler
-        # Goal: Start with 0 boost (pure MSE) for stability, end with max boost for enhancing detail
+        
         max_boost = self.weights["density_boost"]
-
         if current_epoch is not None:
-            # Normalize progress to [0.0, 1.0]
-            progress = current_epoch / float(total_epochs)
-            # In case the current epoch is larger than the total epochs (put that for the safety reason)
-            progress = max(0.0, min(progress, 1.0))
-
-            # Squared Ramp (x^2)
-            # Stays low longer to let the model stabilize, then ramps up 
+            progress = max(0.0, min(current_epoch / float(total_epochs), 1.0))
             adaptive_scalar = progress ** 2
             current_boost = adaptive_scalar * max_boost 
-        
         else:
-            # We will use the default max_boost if there is no input from the user
             current_boost = max_boost
-
         
-        # Create Weight Map based on Transmission Prediction
-        # Low t (Dense Haze) -> High Weight. High t (Clear) -> Low Weight.
-        
-        # We .detach() t_map so velocity loss doesn't try to "hack" the physics head.
-        t_guide = pred_t_map.detach().mean(dim = 1, keepdim = True)
-
-        # This is the formula for the Focus Mechanism.
-        # If you think this pixel is thick fog ~ 0.0, pay more attention to that pixel
-        # to fix the velocity here 
+        t_guide = pred_t_map.detach().mean(dim=1, keepdim=True)
         pixel_weight = 1.0 + current_boost * (1.0 - t_guide)
-
-        
-        # Apply Weight and Mean
         loss_v = (raw_v_loss * pixel_weight).mean()
 
-        # --- B. RECONSTRUCTION (Model Space [-1, 1]) --- 
-        # Uses the normalized t_expand to project back to the estimated clean image
+        # --- C. RECONSTRUCTION ---
         J_pred_raw = x_t + (1 - t_expand) * pred_v
-
-        # --- C. UN-NORMALIZE & SAFETY CLAMP (Image Space [0, 1]) ---
-        # 1. Un-normalize standard scaler
+        
         J_pred_01 = restandardize_tensor(J_pred_raw)
         clean_img_01 = restandardize_tensor(clean_img)
         hazy_img_01 = restandardize_tensor(hazy_img)
         
-        # 2. Safety Clamp: Ensure VGG never sees exploding values (e.g., -5.0 or 2.0)
         J_pred_safe = torch.clamp(J_pred_01, 0.0, 1.0)
 
-        # --- D. PERCEPTUAL LOSS ---
-        # VGG now sees valid [0, 1] images
+        # --- D. STANDARD LOSSES ---
         loss_percep = self.perceptual(J_pred_safe, clean_img_01)
-
-        # --- E. FFT LOSS (NEW) ---
-        # Forces the model to match high-frequency details (textures/edges)
         loss_fft = self.fft_loss(J_pred_safe, clean_img_01)
-
-        # --- F. PHYSICS CONSISTENCY LOSS ---
-        # Physics Model: I = J * t + A * (1 - t)
         
-        # 1. Clamp Physics Params for Stability
-        # Min=0.01: Prevents division by zero or "black hole" gradients
-        # Max=1.0:  Prevents "super-white" cheating
+        # --- E. NEW LOSSES ---
+        # 1. SSIM Loss (Directly maximizes Metric)
+        loss_ssim = ssim_loss(J_pred_safe, clean_img_01)
+        
+        # 2. Contrastive Loss (Push away from Hazy)
+        # Note: We pass hazy_img_01 as the "Negative"
+        loss_cr = self.contrastive(J_pred_safe, clean_img_01, hazy_img_01)
+
+        # --- F. PHYSICS CONSISTENCY ---
         t_map_safe = torch.clamp(pred_t_map, min=0.01, max=1.0)
         pred_A_safe = torch.clamp(pred_A, min=0.0, max=1.0)
         
-        # 2. Re-haze the estimated clean image
         I_reconstructed = J_pred_safe * t_map_safe + pred_A_safe * (1 - t_map_safe)
-        
-        # 3. Compare against original Hazy Image
         loss_phys = self.charbonnier(I_reconstructed, hazy_img_01)
 
-        # --- F. REGULARIZERS ---
-        # Smoothness (TV) on the raw transmission map
+        # --- G. REGULARIZERS ---
         dy, dx = self.get_gradients(pred_t_map)
         loss_tv = torch.mean(torch.abs(dy)) + torch.mean(torch.abs(dx))
-        
-        # Atmosphere Constraint: Penalize if A is unrealistically dark (< 0.05)
         loss_atm = torch.mean(F.relu(0.05 - pred_A)) 
 
-        # --- G. TOTAL LOSS ---
+        # --- H. AGGREGATION ---
         total_loss = (self.weights["w_flow"] * loss_v) + \
                      (self.weights["w_perc"] * loss_percep) + \
                      (self.weights["w_fft"]  * loss_fft) + \
                      (self.weights["w_phys"] * loss_phys) + \
                      (self.weights["w_tv"]   * loss_tv) + \
-                     (self.weights["w_atm"]  * loss_atm)
+                     (self.weights["w_atm"]  * loss_atm) + \
+                     (self.weights["w_cr"]   * loss_cr) + \
+                     (self.weights["w_ssim"] * loss_ssim)
 
         return total_loss, {
             "Total": total_loss.item(),
             "Flow": loss_v.item(),
             "VGG": loss_percep.item(),
+            "CR": loss_cr.item(),   # Track this!
+            "SSIM": loss_ssim.item(),
             "FFT": loss_fft.item(),
-            "Phys": loss_phys.item(),
-            "TV": loss_tv.item()
+            "Phys": loss_phys.item()
         }

@@ -54,6 +54,8 @@ _C.LOSS.W_PHYS = 0.2
 _C.LOSS.W_TV = 0.01
 _C.LOSS.W_ATM = 0.01 
 _C.LOSS.W_FFT = 0.1
+_C.LOSS.W_CR = 0.1
+_C.LOSS.W_SSIM = 0.2
 _C.LOSS.DENSITY_BOOST = 5.0
 
 # --- Evaluation ---

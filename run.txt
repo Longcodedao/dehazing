@@ -76,16 +76,16 @@ torchrun --nproc_per_node=4 main.py \
 
 
 ## --- Training NH-HAZE ---- 
-torchrun --nproc_per_node=2 main.py \
+torchrun --nproc_per_node=1 main.py \
   --seed 42 \
   --model-config "small" \
   --pretrain-config "configs/train_cfgs/pretrain_schedule_NH-HAZE.yaml" \
   --dataset_root "dataset" \
   --dataset_name "NHHAZE" \
-  --log_dir "logs/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2" \
-  --checkpoint_dir "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2" \
+  --log_dir "logs/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V21" \
+  --checkpoint_dir "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V21" \
   --num_workers 4 \
-  --resume "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V2/stage_0_res256/latest.pt"
+  --resume "checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V21/stage_0_res256/latest.pt"
 
 
   --gradient-checkpointing \

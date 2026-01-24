@@ -3,9 +3,6 @@ SCHEDULE:
     EPOCHS: 300
     BATCH_SIZE: 8
 
-  # - RESOLUTION: 512 
-  #   EPOCHS: 5
-  #   BATCH_SIZE: 8
     
 SCHEDULER:
     TYPE: Cosine

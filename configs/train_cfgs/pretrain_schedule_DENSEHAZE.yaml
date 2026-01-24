@@ -1,0 +1,29 @@
+SCHEDULE:
+  - RESOLUTION: 256 
+    EPOCHS: 500         # INCREASED: Dense haze takes longer to converge
+    BATCH_SIZE: 8
+
+SCHEDULER:
+    TYPE: Cosine
+    WARMUP_EPOCHS: 50   # INCREASED: Slower warmup stabilizes the "hallucination" phase
+    
+OPTIM:
+    LR: 0.0002
+
+LOSS:
+    W_FLOW: 1.0
+    W_PERC: 0.5         # INCREASED (0.2 -> 0.5): Essential. Pixels are grey, so VGG structure matters more.
+    W_PHYS: 0.05        # DECREASED (0.2 -> 0.05): Physics formula breaks when t -> 0. Don't force it too hard.
+    W_TV: 0.01
+    W_ATM: 0.00 
+    W_FFT: 0.1          # INCREASED (0.05 -> 0.1): Need strong help recovering lost edges/textures.
+    W_CR: 0.2           # INCREASED (0.1 -> 0.2): The input is VERY white. We need a stronger "push" away from it.
+    W_SSIM: 0.3         # INCREASED (0.2 -> 0.3): Helps preserve local structure amidst the fog.
+    DENSITY_BOOST: 5.0  # KEEP HIGH: The whole image is a "dense region".
+
+TRAIN:
+    STEPS_PER_EPOCH: 200
+    PATIENCE: 80        # INCREASED: Improvement is slow and steady, don't stop too early.
+
+EVAL:
+    METRIC_EARLY_STOPPING: SSIM

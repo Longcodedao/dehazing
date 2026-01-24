@@ -1,5 +1,5 @@
 SCHEDULE:
-  - RESOLUTION: 256 
+  - RESOLUTION: 512 
     EPOCHS: 500         # INCREASED: Dense haze takes longer to converge
     BATCH_SIZE: 8
 

@@ -100,4 +100,15 @@ torchrun --nproc_per_node=1 main.py \
   --pretrained_model checkpoints/NHHAZE_FM_PhysicMamba_UNET_Version2_Small_V21//stage_0_res256/best.pt \
   --resume "checkpoints/DENSEHAZE_FM_PhysicMamba_UNET_Version2_Small_V21/stage_0_res256/latest.pt"
 
+## --- Training DENSE-HAZE FROM SCRATCH ---- 
+torchrun --nproc_per_node=1 main.py \
+  --seed 42 \
+  --model-config "small" \
+  --pretrain-config "configs/train_cfgs/pretrain_schedule_DENSEHAZE.yaml" \
+  --dataset_root "dataset" \
+  --dataset_name "DENSEHAZE" \
+  --log_dir "logs/(TRAIN)DENSEHAZE_FM_PhysicMamba_UNET_Version2_Small_V21_2" \
+  --checkpoint_dir "checkpoints/(TRAIN)DENSEHAZE_FM_PhysicMamba_UNET_Version2_Small_V21" \
+  --num_workers 4 \
+  --resume "checkpoints/(TRAIN)DENSEHAZE_FM_PhysicMamba_UNET_Version2_Small_V21/stage_0_res256/latest.pt"
 

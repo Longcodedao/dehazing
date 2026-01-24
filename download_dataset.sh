@@ -75,21 +75,21 @@ mkdir -p "$ROOT_DATASET"
 # ---
 
 # 1. Indoor Training Set (ITS)
-# FOLDER_NAME="indoor-training-set"
-# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+FOLDER_NAME="indoor-training-set"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-# echo "Downloading: RESIDE STANDARD Indoor Training Set (ITS)..."
-# mkdir -p "$TARGET_PATH"
-# kaggle datasets download -d balraj98/indoor-training-set-its-residestandard \
-#       --unzip -p "$TARGET_PATH"
+echo "Downloading: RESIDE STANDARD Indoor Training Set (ITS)..."
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d balraj98/indoor-training-set-its-residestandard \
+      --unzip -p "$TARGET_PATH"
 
-# FOLDER_NAME="reside-sots"
-# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+FOLDER_NAME="reside-sots"
+TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-# echo "Downloading: RESIDE STANDARD SOTS ..."
-# mkdir -p "$TARGET_PATH"
-# kaggle datasets download -d balraj98/synthetic-objective-testing-set-sots-reside\
-#       --unzip -p "$TARGET_PATH"
+echo "Downloading: RESIDE STANDARD SOTS ..."
+mkdir -p "$TARGET_PATH"
+kaggle datasets download -d balraj98/synthetic-objective-testing-set-sots-reside\
+      --unzip -p "$TARGET_PATH"
 
 
 # ---
@@ -110,13 +110,13 @@ mkdir -p "$ROOT_DATASET"
 # ---
 
 # 3. DenseHaze
-FOLDER_NAME="dense-haze"
-TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+# FOLDER_NAME="dense-haze"
+# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "Downloading: DenseHaze..."
-mkdir -p "$TARGET_PATH"
-kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
-      --unzip -p "$TARGET_PATH"
+# echo "Downloading: DenseHaze..."
+# mkdir -p "$TARGET_PATH"
+# kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
+#       --unzip -p "$TARGET_PATH"
 
 # ---
 
@@ -132,13 +132,13 @@ kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
 # ---
 
 # 5. NH-HAZE
-FOLDER_NAME="nh-haze"
-TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+# FOLDER_NAME="nh-haze"
+# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "Downloading: NH-HAZE..."
-mkdir -p "$TARGET_PATH"
-kaggle datasets download -d litheshshetty/nh-haze \
-        --unzip -p "$TARGET_PATH"
+# echo "Downloading: NH-HAZE..."
+# mkdir -p "$TARGET_PATH"
+# kaggle datasets download -d litheshshetty/nh-haze \
+#         --unzip -p "$TARGET_PATH"
 
 # ---
 

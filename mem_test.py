@@ -17,7 +17,7 @@ BASE_DIM = 64
 print(f"🔍 Profiling Model GFLOPs & Params with Base Dim: {BASE_DIM}...")
 
 # 1. Initialize Model
-model = FM_PhysMamba_UNET(model_cfg_path="large", use_version=2).to(DEVICE)
+model = FM_PhysMamba_UNET(model_cfg_path="small", use_version=2).to(DEVICE)
 model.eval() 
 
 # 2. Create Dummy Data

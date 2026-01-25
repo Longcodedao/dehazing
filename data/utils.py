@@ -207,7 +207,8 @@ def get_haze_transforms(
         return val_transform
 
 
-def partition_dataset(dataset, train_transform, val_transform, train_ratio=0.8):
+def partition_dataset(dataset, train_transform, val_transform, 
+                      train_ratio=0.8, seed = 42):
     indices = torch.randperm(len(dataset)).tolist()
     num_train = int(len(dataset) * train_ratio)
     

@@ -84,6 +84,14 @@ class FM_PhysicalLoss(nn.Module):
     def forward(self, pred_tuple, target_v, x_t, timestep, clean_img, hazy_img, current_epoch=None, total_epochs=100):
         pred_v, pred_t_map, pred_A = pred_tuple
 
+        # --- 1. CLAMP IMMEDIATELY (Safety First) ---
+        # Clamp raw prediction to strictly positive range [0.01, 1.0]
+        # This prevents t=0 or t<0 explicitly everywhere below
+        pred_t_map = torch.clamp(pred_t_map, min=0.01, max=1.0)
+        
+        # Also clamp A (Atmospheric Light) to [0, 1]
+        pred_A = torch.clamp(pred_A, min=0.0, max=1.0)
+        
         # --- A. TIME NORM ---
         if timestep.max() > 1.0:
             t_norm = timestep.float() / 1000.0
@@ -128,10 +136,10 @@ class FM_PhysicalLoss(nn.Module):
         loss_cr = self.contrastive(J_pred_safe, clean_img_01, hazy_img_01)
 
         # --- F. PHYSICS CONSISTENCY ---
-        t_map_safe = torch.clamp(pred_t_map, min=0.01, max=1.0)
-        pred_A_safe = torch.clamp(pred_A, min=0.0, max=1.0)
+        # t_map_safe = torch.clamp(pred_t_map, min=0.01, max=1.0)
+        # pred_A_safe = torch.clamp(pred_A, min=0.0, max=1.0)
         
-        I_reconstructed = J_pred_safe * t_map_safe + pred_A_safe * (1 - t_map_safe)
+        I_reconstructed = J_pred_safe * pred_t_map + pred_A * (1 - t_map_safe)
         loss_phys = self.charbonnier(I_reconstructed, hazy_img_01)
 
         # --- G. REGULARIZERS ---

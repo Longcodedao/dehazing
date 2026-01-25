@@ -1,7 +1,7 @@
 SCHEDULE:
   - RESOLUTION: 512 
     EPOCHS: 500         # INCREASED: Dense haze takes longer to converge
-    BATCH_SIZE: 8
+    BATCH_SIZE: 4
 
 SCHEDULER:
     TYPE: Cosine
@@ -19,7 +19,7 @@ LOSS:
     W_FFT: 0.1          # INCREASED (0.05 -> 0.1): Need strong help recovering lost edges/textures.
     W_CR: 0.2           # INCREASED (0.1 -> 0.2): The input is VERY white. We need a stronger "push" away from it.
     W_SSIM: 0.3         # INCREASED (0.2 -> 0.3): Helps preserve local structure amidst the fog.
-    DENSITY_BOOST: 5.0  # KEEP HIGH: The whole image is a "dense region".
+    DENSITY_BOOST: 2
 
 TRAIN:
     STEPS_PER_EPOCH: 200

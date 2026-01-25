@@ -139,7 +139,7 @@ class FM_PhysicalLoss(nn.Module):
         # t_map_safe = torch.clamp(pred_t_map, min=0.01, max=1.0)
         # pred_A_safe = torch.clamp(pred_A, min=0.0, max=1.0)
         
-        I_reconstructed = J_pred_safe * pred_t_map + pred_A * (1 - t_map_safe)
+        I_reconstructed = J_pred_safe * pred_t_map + pred_A * (1 - pred_t_map)
         loss_phys = self.charbonnier(I_reconstructed, hazy_img_01)
 
         # --- G. REGULARIZERS ---

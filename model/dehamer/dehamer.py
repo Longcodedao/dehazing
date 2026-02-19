@@ -150,7 +150,8 @@ class Dehamer(nn.Module):
         for m in self.modules():
             if isinstance(m, nn.ConvTranspose2d) or isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight.data)
-                m.bias.data.zero_()
+                if m.bias is not None:
+                    m.bias.data.zero_()
 
 
     def forward(self, x):

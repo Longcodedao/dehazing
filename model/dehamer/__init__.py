@@ -1,2 +1,2 @@
 from .swin import SwinTransformer
-from dehammer import Dehamer
+from .dehamer import Dehamer

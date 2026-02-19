@@ -5,6 +5,7 @@ import numpy as np
 import math
 from .antialias import AntiAlias_Downsample
 
+
 """
 Residual Resizing Modules (RRM):
 Combining Residual Connections for tackling the gradient vanishing problem
@@ -98,7 +99,7 @@ class DownSample(nn.Module):
 
 
 class UpSample(nn.Module):
-    def __init__(UpSample, in_channels, scale_factor, stride = 2, kernel_size = 3):
+    def __init__(self, in_channels, scale_factor, stride = 2, kernel_size = 3):
         super(UpSample, self).__init__()
         num_blocks = int(round(math.log(scale_factor, stride)))
 

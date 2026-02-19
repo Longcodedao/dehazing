@@ -39,4 +39,11 @@ class DeHamerPosEmbed(nn.Module):
         haze_density: DCP map (B, 1, H, W)
         """
         B, C, H, W = x.shape
-        B_D, B
+        B_D, C_D, H_D, W_D = haze_density.shape
+        assert B_D == B and C_D == 1 and H == H_D and W == W_D
+
+        device = x.device
+        eps = 1e-6
+
+        y_embed = torch.arange(H, device = device).view(H, 1).repeat(1, W).float()
+        x_embed = torch.arange(W, device = device).view(1, W).repeat(H, 1).float()

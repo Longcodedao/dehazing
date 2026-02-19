@@ -5,7 +5,6 @@ import numpy as np
 import math
 from .antialias import AntiAlias_Downsample
 
-
 """
 Residual Resizing Modules (RRM):
 Combining Residual Connections for tackling the gradient vanishing problem

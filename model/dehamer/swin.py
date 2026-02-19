@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 from timm.layers import DropPath, to_2tuple, trunc_normal_
+from .utils import get_dark_channel, DeHamerPosEmbed
 
 
 def window_partition(x, window_size):
@@ -580,8 +581,8 @@ class SwinTransformer(nn.Module):
         # depth_map = self.DarkChannel(x)
         depth_map = get_dark_channel(x)
         x = self.patch_embed(x)
-        print(f"Depth math shape: {depth_map.shape}")
-        print(f"Patches images shape: {x.shape}")
+        # print(f"Depth math shape: {depth_map.shape}")
+        # print(f"Patches images shape: {x.shape}")
         Wh, Ww = x.size(2), x.size(3)
         depth_pool =  F.interpolate(depth_map, size=(Wh, Ww), mode='bicubic')       
         absolute_pos_embed = self.pos_embed(x , depth_pool)
@@ -590,7 +591,7 @@ class SwinTransformer(nn.Module):
 
         outs = []
         for i in range(self.num_layers):
-            print('layer:',i)
+            # print('layer:', i)
             layer = self.layers[i]
             x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
 
@@ -600,6 +601,7 @@ class SwinTransformer(nn.Module):
 
                 out = x_out.view(-1, H, W, self.num_features[i]).permute(0, 3, 1, 2).contiguous()
                 outs.append(out)
+                
         return tuple(outs)
 
     def train(self, mode=True):

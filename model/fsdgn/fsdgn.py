@@ -165,76 +165,98 @@ class ResBlock_fft_bench(nn.Module):
 
 
 ### MDC Blocks
-class Decoder_MDCBlock1(nn.Module):
-    def __init__(self, num_filter, num_ft, num, kernel_size=4, stride=2, padding=1):
-        super().__init__()
-        self.num_ft = num_ft - 1
-        self.down_convs = nn.ModuleList()
-        self.up_convs = nn.ModuleList()
-        curr_ch = num_filter
-        for i in range(self.num_ft):
-            next_ch = curr_ch + 2 ** (num + i)
-            self.down_convs.append(
-                ConvBlock(curr_ch, next_ch, kernel_size,stride, padding)
-            )
-            self.up_convs.append(
-                DeconvBlock(next_ch, curr_ch, kernel_size, stride, padding)
-            )
-            curr_ch = next_ch
-
-    def forward(self, ft_h, ft_l_list):
-        ft_fusion = ft_h
-        for i, skip_ft in enumerate(ft_l_list):
-            ft = ft_fusion
-            depth = self.num_ft - i
-            for j in range(depth):
-                ft = self.down_convs[j](ft)
-            
-            ft = F.interpolate(ft, size=skip_ft.shape[-2:], mode='bilinear', align_corners=False)
-            ft = ft - skip_ft
-            
-            for j in range(depth):
-                ft = self.up_convs[depth - j - 1](ft)
-                
-            ft_fusion = F.interpolate(ft_fusion, size=ft.shape[-2:], mode='bilinear', align_corners=False)
-            ft_fusion = ft_fusion + ft
-        return ft_fusion
-
-
-class Encoder_MDCBlock1(nn.Module):
-    def __init__(self, num_filter, num_ft, kernel_size = 4, stride = 2, padding = 1):
-        super().__init__()
+class Encoder_MDCBlock(torch.nn.Module):
+    """
+    Refined Multi-scale Fusion for the Encoder path.
+    Fuses Low-resolution features with a list of High-resolution feature maps.
+    """
+    def __init__(self, num_filter, num_ft, kernel_size=4, stride=2, padding=1, 
+                 bias=True, activation='prelu', norm=None, mode='iter2'):
+        super(Encoder_MDCBlock, self).__init__()
+        self.mode = mode
         self.num_ft = num_ft - 1
         self.up_convs = nn.ModuleList()
         self.down_convs = nn.ModuleList()
-        curr_ch = num_filter
+        
         for i in range(self.num_ft):
-            next_ch = curr_ch - 2 ** (num_ft - i)
+            # Channels decrease as resolution increases in the Encoder
+            in_ch = num_filter // (2 ** i)
+            out_ch = num_filter // (2 ** (i + 1))
+            
             self.up_convs.append(
-                DeconvBlock(curr_ch, next_ch, kernel_size, stride, padding)
+                DeconvBlock(in_ch, out_ch, kernel_size, stride, padding, bias, activation)
             )
             self.down_convs.append(
-                ConvBlock(next_ch, curr_ch, kernel_size, stride, padding)
+                ConvBlock(out_ch, in_ch, kernel_size, stride, padding, bias, activation)
             )
-            curr_ch = next_ch
 
-    def forward(self, ft_l, ft_h_list):
-        ft_fusion = ft_l
-        for i, skip_ft in enumerate(ft_h_list):
-            ft = ft_fusion
-            depth = self.num_ft - i
-            for j in range(depth):
-                ft = self.up_convs[j](ft)
+    def _forward_iter1(self, ft_l, ft_h_list):
+        """
+        Sequential back-projection logic for Encoder.
+        """
+        history = []
+        n = len(ft_h_list)
+        
+        # Upward pass: Moving from Low-res input to High-res scales
+        for i in range(n):
+            history.append(ft_l)
+            idx = max(0, self.num_ft - n + i)
+            ft_l = self.up_convs[idx](ft_l)
+
+        # Downward fusion pass: Calculate residual error in high-res space
+        fusion = ft_l
+        for i in range(n):
+            residual = fusion - ft_h_list[i]
+            idx = max(0, self.num_ft - i - 1)
+            # Apply down-conv to residual and add back the historical low-res state
+            fusion = self.down_convs[idx](residual) + history[n - i - 1]
+
+        return fusion
+
+    def _forward_iter2(self, ft_l, ft_h_list):
+        """Interpolation-based feedback mode for Encoder."""
+        fusion = ft_l
+        n = len(ft_h_list)
+
+        for i in range(n):
+            temp = fusion 
+
+            # 1. Project Up: Increase resolution to reach target skip-connection scale
+            num_steps = self.num_ft - i
+            for j in range(num_steps):
+                temp = self.up_convs[j](temp)
+
+            # 2. Align spatial size and compute error
+            target_shape = ft_h_list[i].shape[-2:]
+            if temp.shape[-2:] != target_shape:
+                temp = F.interpolate(temp, size=target_shape, mode='bilinear', align_corners=False)
+            error = temp - ft_h_list[i]
+
+            # 3. Project error back down to low-resolution
+            for j in range(num_steps):
+                # Reverse idx for down-sampling
+                down_idx = num_steps - j - 1
+                error = self.down_convs[down_idx](error)
             
-            ft = F.interpolate(ft, size=skip_ft.shape[-2:], mode='bilinear', align_corners=False)
-            ft = ft - skip_ft
+            # 4. Update the low-resolution fusion feature
+            if fusion.shape[-2:] != error.shape[-2:]:
+                fusion = F.interpolate(fusion, size=error.shape[-2:], mode='bilinear', align_corners=False)
             
-            for j in range(depth):
-                ft = self.down_convs[depth - j - 1](ft)
+            fusion = fusion + error
             
-            ft_fusion = F.interpolate(ft_fusion, size=ft.shape[-2:], mode='bilinear', align_corners=False)
-            ft_fusion = ft_fusion + ft
-        return ft_fusion
+        return fusion 
+    
+    def forward(self, ft_low, ft_high_list):
+        """
+        ft_low: Low-resolution input feature map
+        ft_high_list: List of high-resolution skip-connection features
+        """
+        if self.mode in ['iter1', 'conv']:
+            return self._forward_iter1(ft_low, ft_high_list)
+        elif self.mode == 'iter2':
+            return self._forward_iter2(ft_low, ft_high_list)
+        else:
+            raise ValueError(f"Mode '{self.mode}' is not supported. Use 'iter1' or 'iter2'.")
 
 
 class FSDGN(nn.Module):
@@ -258,12 +280,12 @@ class FSDGN(nn.Module):
         
         # Fusion Blocks (
         self.enc_fusions = nn.ModuleList([
-            Encoder_MDCBlock1(chs[1], 2), Encoder_MDCBlock1(chs[2], 3),
-            Encoder_MDCBlock1(chs[3], 4), Encoder_MDCBlock1(chs[4], 5)
+            Encoder_MDCBlock(chs[1], 2), Encoder_MDCBlock(chs[2], 3),
+            Encoder_MDCBlock(chs[3], 4), Encoder_MDCBlock(chs[4], 5)
         ])
         self.dec_fusions = nn.ModuleList([
-            Decoder_MDCBlock1(chs[3], 2, 5), Decoder_MDCBlock1(chs[2], 3, 4),
-            Decoder_MDCBlock1(chs[1], 4, 3), Decoder_MDCBlock1(chs[0], 5, 2)
+            Decoder_MDCBlock(chs[3], 2, 5), Decoder_MDCBlock(chs[2], 3, 4),
+            Decoder_MDCBlock(chs[1], 4, 3), Decoder_MDCBlock(chs[0], 5, 2)
         ])
 
         # ------------------- STAGE 2 (Spatial / Local Branch) -------------------
@@ -273,12 +295,12 @@ class FSDGN(nn.Module):
         self.res_blocks2 = nn.ModuleList([ResBlock(c) for c in chs_enc_dec])
         
         self.enc_fusions2 = nn.ModuleList([
-            Encoder_MDCBlock1(chs[1], 2), Encoder_MDCBlock1(chs[2], 3),
-            Encoder_MDCBlock1(chs[3], 4), Encoder_MDCBlock1(chs[4], 5)
+            Encoder_MDCBlock(chs[1], 2), Encoder_MDCBlock(chs[2], 3),
+            Encoder_MDCBlock(chs[3], 4), Encoder_MDCBlock(chs[4], 5)
         ])
         self.dec_fusions2 = nn.ModuleList([
-            Decoder_MDCBlock1(chs[3], 2, 5), Decoder_MDCBlock1(chs[2], 3, 4),
-            Decoder_MDCBlock1(chs[1], 4, 3), Decoder_MDCBlock1(chs[0], 5, 2)
+            Decoder_MDCBlock(chs[3], 2, 5), Decoder_MDCBlock(chs[2], 3, 4),
+            Decoder_MDCBlock(chs[1], 4, 3), Decoder_MDCBlock(chs[0], 5, 2)
         ])
 
         # Cross-Stage Feature Fusion (CSFF)

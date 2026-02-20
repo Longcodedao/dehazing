@@ -25,7 +25,7 @@ from rich.panel import Panel
 # --- Local Application Imports ---
 from utils_ddp import is_main_process
 from utils import pad_to_multiple, unpad
-from model import ODESolver, path_sampler 
+from model.fmphys_mamba import ODESolver, path_sampler 
 from data.utils import restandardize_tensor
 import scheduler
 

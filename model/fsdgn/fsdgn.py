@@ -165,6 +165,101 @@ class ResBlock_fft_bench(nn.Module):
 
 
 ### MDC Blocks
+class Decoder_MDCBlock(torch.nn.Module):
+    """
+    Refined Multi-scale Fusion for the Decoder path.
+    Fuses High-resolution features with a list of Low-resolution feature maps.
+    """
+    def __init__(self, num_filter, num_ft, num, kernel_size=4, stride=2, padding=1, 
+                 bias=True, activation='prelu', norm=None, mode='iter2'):
+        super(Decoder_MDCBlock, self).__init__()
+        self.mode = mode
+        self.num_ft = num_ft - 1
+        self.down_convs = nn.ModuleList()
+        self.up_convs = nn.ModuleList()
+
+        in_ch = num_filter
+        for i in range(self.num_ft):
+            out_ch = in_ch + 2 ** (num + i)
+            
+            self.down_convs.append(
+                ConvBlock(in_ch, out_ch, kernel_size, stride, padding, bias, activation)
+            )
+            self.up_convs.append(
+                DeconvBlock(out_ch, in_ch, kernel_size, stride, padding, bias, activation)
+            )
+            in_ch = out_ch
+
+    def _forward_iter1(self, ft_h, ft_l_list):
+        """
+        Sequential back-projection logic.
+        Matches the logic used in DBPN (Deep Back-Projection Networks).
+        """
+        history = []
+        # Donwward pass: Track the state of the high-res feature at different scale
+        for i in range(len(ft_l_list)):
+            history.append(ft_h)
+            idx = max(0, self.num_ft - len(ft_l_list) + i)
+            ft_h = self.down_convs[idx](ft_h)
+
+        # Upward fusion pass: Calculate residual error between scales
+        fusion = ft_h
+        for i in range(len(ft_l_list)):
+            residual = fusion - ft_l_list[i]
+            idx = max(0, self.num_ft - i - 1)
+            # Apply up-conv to residual and add back the historical high-res feature
+            fusion = self.up_convs[idx](residual) + history[len(ft_l_list) - i - 1]
+
+        return fusion
+
+
+    def _forward_iter2(self, ft_h, ft_l_list):
+        """Interpolation-based feedback mode."""
+        fusion = ft_h
+
+        for i in range(len(ft_l_list)):
+            temp = fusion 
+
+            # 1. Project Down: Progressively reduce resolution
+            # We only project down as many times as there are levels in the list
+            num_steps = self.num_ft - i
+            for j in range(num_steps):
+                temp = self.down_convs[j](temp)
+
+            # 2. Align spatial size and compute error
+            target_shape = ft_l_list[i].shape[-2:]
+            temp = F.interpolate(temp, size = target_shape, mode = 'bilinear', align_corners=False)
+            error = temp - ft_l_list[i]
+
+            # 3. Project error backup to high-resolution
+            for j in range(num_steps):
+                # Reverse idx for up-sampling
+                up_idx = num_steps - j - 1
+                error = self.up_convs[up_idx](error)
+            
+            # 4. Update the high-resolution fusion feature
+            error_shape = error.shape[-2:]
+            fusion_resized = F.interpolate(fusion, size = error_shape, mode='bilinear', align_corners=False)
+            fusion = fusion_resized + error
+            
+        return fusion        
+    
+ 
+    def forward(self, ft_high, ft_low_list):
+        """
+        ft_high: High-resolution input feature map
+        ft_low_list: List of low-resolution skip-connection features
+        """
+        # return ft_fusion
+        if self.mode in ['iter1', 'conv']:
+            return self._forward_iter1(ft_high, ft_low_list)
+        elif self.mode in ['iter2']:
+            return self._forward_iter2(ft_high, ft_low_list)
+
+        else:
+            raise ValueError(f"Mode '{self.mode}' is not supported. Use 'iter1' or 'iter2'.")
+
+
 class Encoder_MDCBlock(torch.nn.Module):
     """
     Refined Multi-scale Fusion for the Encoder path.
@@ -178,10 +273,10 @@ class Encoder_MDCBlock(torch.nn.Module):
         self.up_convs = nn.ModuleList()
         self.down_convs = nn.ModuleList()
         
+        in_ch = num_filter 
         for i in range(self.num_ft):
             # Channels decrease as resolution increases in the Encoder
-            in_ch = num_filter // (2 ** i)
-            out_ch = num_filter // (2 ** (i + 1))
+            out_ch = in_ch - 2 ** (num_ft - i)
             
             self.up_convs.append(
                 DeconvBlock(in_ch, out_ch, kernel_size, stride, padding, bias, activation)
@@ -189,6 +284,7 @@ class Encoder_MDCBlock(torch.nn.Module):
             self.down_convs.append(
                 ConvBlock(out_ch, in_ch, kernel_size, stride, padding, bias, activation)
             )
+            in_ch = out_ch
 
     def _forward_iter1(self, ft_l, ft_h_list):
         """
@@ -225,7 +321,6 @@ class Encoder_MDCBlock(torch.nn.Module):
             num_steps = self.num_ft - i
             for j in range(num_steps):
                 temp = self.up_convs[j](temp)
-
             # 2. Align spatial size and compute error
             target_shape = ft_h_list[i].shape[-2:]
             if temp.shape[-2:] != target_shape:

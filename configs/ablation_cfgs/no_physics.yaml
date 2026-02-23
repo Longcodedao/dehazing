@@ -19,7 +19,7 @@ LOSS:
     # Physics Arrangement
     W_PHYS: 0.0
     # Keep small TV—it helps edges without strong physics
-    W_TV: 0.01
+    W_TV: 0.00
     W_ATM: 0.00 
 
     W_FLOW: 1.0

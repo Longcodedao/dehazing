@@ -110,13 +110,13 @@ mkdir -p "$ROOT_DATASET"
 # ---
 
 # 3. DenseHaze
-FOLDER_NAME="dense-haze"
-TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
+# FOLDER_NAME="dense-haze"
+# TARGET_PATH="$ROOT_DATASET/$FOLDER_NAME"
 
-echo "Downloading: DenseHaze..."
-mkdir -p "$TARGET_PATH"
-kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
-      --unzip -p "$TARGET_PATH"
+# echo "Downloading: DenseHaze..."
+# mkdir -p "$TARGET_PATH"
+# kaggle datasets download -d rajat95gupta/hazing-images-dataset-cvpr-2019 \
+#       --unzip -p "$TARGET_PATH"
 
 # ---
 

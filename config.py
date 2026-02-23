@@ -13,6 +13,7 @@ _C.CHECKPOINT_INTERVAL = 5
 
 # --- Data Paths ---
 _C.DATA = CN()
+_C.DATA.NAME = "NH-HAZE"
 _C.DATA.DATASET_ROOT = "dataset"
 _C.DATA.RESIDE_INDOOR_PATH = "indoor-training-set"
 _C.DATA.RESIDE_OUTDOOR_PATH = "outdoor-training-set"
@@ -31,6 +32,7 @@ _C.TRAIN.RESUME_PATH = ""
 _C.TRAIN.PATIENCE = 15 
 # Default for training set (Only turns if the dataset size is small)
 _C.TRAIN.STEPS_PER_EPOCH = 0
+_C.TRAIN.GRADIENT_CHECKPOINTING = False
 
 # --- Optimization ---
 _C.OPTIM = CN()

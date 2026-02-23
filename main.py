@@ -24,7 +24,7 @@ from utils import (
 from utils_ddp import setup_ddp, clean_ddp, is_main_process
 
 # -- MODEL & TRAINER IMPORTS --
-from model import FM_PhysMamba_UNET
+from model.fmphys_mamba import FM_PhysMamba_UNET
 from losses import FM_PhysicalLoss
 from trainer import DehazeTrainer
 

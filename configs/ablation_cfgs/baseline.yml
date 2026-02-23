@@ -27,7 +27,7 @@ LOSS:
     W_FFT: 0.05
     W_SSIM: 0.2
     
-    DENSITY_BOOST: 0.0
+    DENSITY_BOOST: 5.0
 
     W_FLOW: 1.0
 

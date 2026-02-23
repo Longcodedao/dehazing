@@ -17,13 +17,12 @@ OPTIM:
 
 LOSS:
     # Physics Arrangement
-    W_PHYS: 0.00
-    W_TV: 0.00
-    W_ATM: 0.00 
-
+    W_PHYS: 1.0
+    W_TV: 0.01
+    W_ATM: 0.01 
     
-    W_PERC: 0.2
-    W_CR: 0.1
+    W_PERC: 0.00
+    W_CR: 0.00
     
     W_FFT: 0.05
     W_SSIM: 0.2
@@ -32,6 +31,7 @@ LOSS:
 
     W_FLOW: 1.0
 
+    
 
 TRAIN:
     STEPS_PER_EPOCH: 100

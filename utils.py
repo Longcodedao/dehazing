@@ -234,7 +234,7 @@ def get_eval_loader(
             root_dir=os.path.join(dataset_root, "dense-haze"),
             transform=val_transform
         )
-    elif name_upper == "NH-HAZE":
+    elif name_upper == "NHHAZE":
         dataset = NH_Haze_Dataset(
             root_dir=os.path.join(dataset_root, "nh-haze/NH-HAZE"),
             transform=val_transform,

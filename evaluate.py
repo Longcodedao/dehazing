@@ -22,7 +22,7 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 # --- PROJECT IMPORTS ---
 # Ensure these match your actual folder structure
-from model import FM_PhysMamba_UNET, ODESolver
+from model.fmphys_mamba import FM_PhysMamba_UNET, ODESolver
 from data.utils import get_haze_transforms, restandardize_tensor
 from data import RESIDE_SOTS_Indoor
 from utils import pad_to_multiple, unpad, get_eval_loader, predict_large_image, predict_large_image_vectorized

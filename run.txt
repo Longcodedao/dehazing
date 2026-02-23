@@ -112,3 +112,11 @@ torchrun --nproc_per_node=1 main.py \
   --num_workers 4 \
   --resume "checkpoints/(TRAIN)DENSEHAZE_FM_PhysicMamba_UNET_Version2_Small_V21/stage_0_res256/latest.pt"
 
+
+
+python3 evaluate.py \
+  --model_size small \
+  --checkpoint checkpoints/ablation_no_physics/stage_0_res256/best.pt \
+  --data_root dataset \
+  --datasets NHHAZE \
+  --nfe 10

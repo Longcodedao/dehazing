@@ -8,7 +8,7 @@ def get_pad_layer(pad_type):
     if(pad_type in ['refl','reflect']):
         PadLayer = nn.ReflectionPad2d
     elif(pad_type in ['repl','replicate']):
-        PadLayer = nn.ReplicationPad2d
+        PadLayer = nn.ReplicationPad2da
     elif(pad_type=='zero'):
         PadLayer = nn.ZeroPad2d
     else:

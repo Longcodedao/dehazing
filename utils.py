@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
+import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from yacs.config import CfgNode as CN
@@ -41,7 +42,12 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
+        cudnn.deterministic = True
+        cudnn.benchmark = False
+        
 
 
 def get_loaders_for_stage(cfg, dataset_name, resolution, batch_size, rank=0):

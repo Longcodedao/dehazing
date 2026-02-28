@@ -20,7 +20,7 @@ class FFTLoss(nn.Module):
         loss_mag = self.l1_loss(torch.abs(pred_fft), torch.abs(target_fft))
         
         # 2. Phase Loss (Structure/Edges)
-        # Cosine distance handles the -pi to pi wrap-around correctly
+        # Cosine distance handles the -pi to pi wrapS-around correctly
         # Use this for safety :))) 
         pred_angle = torch.angle(pred_fft)
         target_angle = torch.angle(target_fft)

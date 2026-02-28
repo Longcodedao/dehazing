@@ -1,5 +1,6 @@
 from .phys_loss import FM_PhysicalLoss
 from .charbonnier_loss import CharbonnierLoss
-from .perceptual_loss import PerceptualLoss
+from .perceptual_loss import PerceptualLoss, ContrastiveLoss
 
-__all__ = ["FM_PhysicalLoss", "CharbonnierLoss", "PerceptualLoss"]
+__all__ = ["FM_PhysicalLoss", "CharbonnierLoss", 
+           "PerceptualLoss", "ContrastiveLoss"]
